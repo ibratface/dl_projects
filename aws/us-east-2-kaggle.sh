@@ -1,0 +1,10 @@
+export name=kaggle
+export region=us-east-2
+export vpcId=vpc-b6f063df
+export subnetId=subnet-99d17fe2
+export gatewayId=igw-21279648
+export routeTableId=rtb-af4f28c6
+export routeTableAssoc=rtbassoc-39703950
+export securityGroupId=sg-8c5a07e5
+export allocId=eipalloc-7ba01212
+export keyId=aws-key-kaggle

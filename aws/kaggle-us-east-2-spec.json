@@ -1,0 +1,27 @@
+{
+  "ImageId" : "ami-5bc0e73e",
+  "InstanceType": "p2.xlarge",
+  "Placement": {
+      "AvailabilityZone": "us-east-2b"
+  },
+  "KeyName" : "aws-key-kaggle",
+  "EbsOptimized": true,
+  "BlockDeviceMappings": [
+    {
+      "DeviceName": "/dev/sda1",
+      "Ebs": {
+        "DeleteOnTermination": true,
+        "VolumeType": "gp2",
+        "VolumeSize": 128
+      }
+    }
+  ],
+  "NetworkInterfaces": [
+      {
+        "DeviceIndex": 0,
+        "SubnetId": "subnet-99d17fe2",
+        "Groups": [ "sg-8c5a07e5" ],
+        "AssociatePublicIpAddress": false
+      }
+  ]
+}
