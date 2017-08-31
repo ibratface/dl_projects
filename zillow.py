@@ -33,7 +33,7 @@ class DataPreprocessor:
         self.props = None
         self.train = None
         self.lm = linear_model.Ridge(alpha = .5)
-        self.lgfor = None
+        self.trend = None
 
     def transactions(self):
         if self.trxns is None:
@@ -59,14 +59,17 @@ class DataPreprocessor:
     def training(self):
         if self.train is None:
             self.train = from_pickle('zillow/train.pkl')
+            self.trend = from_pickle('zillow/trend.pkl')
 
         if self.train is None:
             trn = self.transactions()
             prp = self.properties()
             mrg = trn.merge(prp, how='left', on='parcelid')
 
-            self.logerror_month = self.forecast_logerror(mrg)
-            mrg = mrg.merge(self.logerror_month, how='left', on=['fips', 'transaction_month'])
+            self.trend = self.forecast_logerror(mrg)
+            to_pickle(self.trend, 'zillow/trend.pkl')
+
+            mrg = mrg.merge(self.trend, how='left', on=['fips', 'transaction_month'])
 
             self.train = mrg
             to_pickle(self.train, 'zillow/train.pkl')
@@ -78,14 +81,14 @@ class DataPreprocessor:
         preds = self.properties().copy()
         gc.collect()
         preds.insert(0, 'transaction_month', month)
-        preds = preds.merge(self.logerror_month, how='left', on=['fips', 'transaction_month'])
+        preds = preds.merge(self.error_trend(), how='left', on=['fips', 'transaction_month'])
         gc.collect()
         return preds
 
-    def logerror_forecast(self):
-        if self.logerror_month is None:
+    def error_trend(self):
+        if self.trend is None:
             self.training()
-        return self.logerror_month
+        return self.trend
 
 #------------------------------------------------------------------------------
 
@@ -257,7 +260,8 @@ class NeuralNet:
                 self.add_map_fit = self.mappers[2][0]
 
         if self.mappers == None:
-            df = self.data.training()
+            df = self.data.training().drop('parcelid', axis=1)
+
             rem_cols = set(df.columns) - set(['logerror', 'logerror_abs'])
             add_cols = set([ c for c in rem_cols if c.startswith('logerror') ] + ['transaction_month'])
             rem_cols = rem_cols - add_cols
@@ -269,7 +273,7 @@ class NeuralNet:
             con_maps = [([c], StandardScaler(with_mean=False)) for c in con_cols]
 
             add_mapper = DataFrameMapper(add_maps)
-            self.add_map_fit = add_mapper.fit(self.data.logerror_forecast())
+            self.add_map_fit = add_mapper.fit(self.data.error_trend())
 
             cat_mapper = DataFrameMapper(cat_maps)
             self.cat_map_fit = cat_mapper.fit(self.data.properties())
@@ -298,14 +302,14 @@ class NeuralNet:
         return x[c < month], x[c == month], x[c > month], y[c < month], y[c == month], y[c > month]
 
     def training(self):
-        if self.x_train == None:
-            self.x_train = from_pickle('zillow/x_train.pkl')
-            self.x_valid = from_pickle('zillow/x_valid.pkl')
-            self.x_test = from_pickle('zillow/x_test.pkl')
+#        if self.x_train == None:
+#            self.x_train = from_pickle('zillow/x_train.pkl')
+#            self.x_valid = from_pickle('zillow/x_valid.pkl')
+#            self.x_test = from_pickle('zillow/x_test.pkl')
 
-            self.y_train = from_pickle('zillow/y_train.pkl')
-            self.y_valid = from_pickle('zillow/y_valid.pkl')
-            self.y_test = from_pickle('zillow/y_test.pkl')
+#            self.y_train = from_pickle('zillow/y_train.pkl')
+#            self.y_valid = from_pickle('zillow/y_valid.pkl')
+#            self.y_test = from_pickle('zillow/y_test.pkl')
 
         if self.x_train == None:
             x = self.data.training().drop(['logerror', 'logerror_abs'], axis=1)
@@ -326,7 +330,7 @@ class NeuralNet:
             self.x_valid = self.transform(self.x_valid, mappers)
             self.x_test = self.transform(self.x_test, mappers)
 
-            print (self.x_test.shape, e_test.as_matrix().shape)
+#            print (self.x_test.shape, e_test.as_matrix().shape)
 
             self.x_train = np.concatenate([self.x_train, e_train.as_matrix()], axis=1)
             self.x_valid = np.concatenate([self.x_valid, e_valid.as_matrix()], axis=1)
@@ -336,13 +340,13 @@ class NeuralNet:
             self.x_valid = self.feature_split(self.x_valid)
             self.x_test = self.feature_split(self.x_test)
 
-            to_pickle(self.x_train, 'zillow/x_train.pkl')
-            to_pickle(self.x_valid, 'zillow/x_valid.pkl')
-            to_pickle(self.x_test, 'zillow/x_test.pkl')
+#            to_pickle(self.x_train, 'zillow/x_train.pkl')
+#            to_pickle(self.x_valid, 'zillow/x_valid.pkl')
+#            to_pickle(self.x_test, 'zillow/x_test.pkl')
 
-            to_pickle(self.y_train, 'zillow/y_train.pkl')
-            to_pickle(self.y_valid, 'zillow/y_valid.pkl')
-            to_pickle(self.y_test, 'zillow/y_test.pkl')
+#            to_pickle(self.y_train, 'zillow/y_train.pkl')
+#            to_pickle(self.y_valid, 'zillow/y_valid.pkl')
+#            to_pickle(self.y_test, 'zillow/y_test.pkl')
 
             gc.collect()
 
@@ -389,7 +393,8 @@ class NeuralNet:
             out = add([out, err_ave_in])
 
             model = Model(inputs=[ i for i, _ in cat_in ] + [ i for i, _ in con_in ] + [ err_ave_in, err_dev_in ], outputs=[den])
-            model.compile('adam', 'mean_absolute_error')
+            opt = keras.optimizers.Adam(lr=0.001, decay=0.05)
+            model.compile(loss='mean_absolute_error', optimizer=opt)
 
             self.model = model
             gc.collect()
