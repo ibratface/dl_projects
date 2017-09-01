@@ -237,8 +237,9 @@ class DataPreprocessor:
 
 class NeuralNet:
 
-    def __init__(self, data):
+    def __init__(self, data, dropcols=set()):
         self.data = data
+        self.dropcols = dropcols
 
         self.x_train = None
         self.x_valid = None
@@ -261,6 +262,7 @@ class NeuralNet:
 
         if self.mappers == None:
             df = self.data.training().drop('parcelid', axis=1)
+            df = df.drop(self.dropcols, axis=1)
 
             rem_cols = set(df.columns) - set(['logerror', 'logerror_abs'])
             add_cols = set([ c for c in rem_cols if c.startswith('logerror') ] + ['transaction_month'])
@@ -268,9 +270,9 @@ class NeuralNet:
             cat_cols = set([ c for c in rem_cols if df[c].dtype.name == 'object' ])
             con_cols = rem_cols - cat_cols
 
-            add_maps = [([c], StandardScaler(with_mean=False)) for c in add_cols]
+            add_maps = [([c], MinMaxScaler()) for c in add_cols]
             cat_maps = [(c, LabelEncoder()) for c in cat_cols]
-            con_maps = [([c], StandardScaler(with_mean=False)) for c in con_cols]
+            con_maps = [([c], MinMaxScaler()) for c in con_cols]
 
             add_mapper = DataFrameMapper(add_maps)
             self.add_map_fit = add_mapper.fit(self.data.error_trend())
@@ -282,7 +284,7 @@ class NeuralNet:
             self.con_map_fit = con_mapper.fit(self.data.training())
 
             self.mappers = [(self.cat_map_fit, 'int64'), (self.con_map_fit, 'float32'), (self.add_map_fit, 'float32')]
-            to_pickle(self.mappers, 'zillow/mappers.pkl')
+            # to_pickle(self.mappers, 'zillow/mappers.pkl')
 
             gc.collect()
 
@@ -315,8 +317,8 @@ class NeuralNet:
             x = self.data.training().drop(['logerror', 'logerror_abs'], axis=1)
             y = self.data.training()['logerror']
 
-            e = x[['logerror_abs_month_ave', 'logerror_abs_month_std']]
-            e['logerror_abs_month_std'] = e['logerror_abs_month_std'].apply(np.sqrt)
+            e = x[['logerror_month_ave', 'logerror_month_std']]
+            e['logerror_month_std'] = e['logerror_month_std'].apply(np.sqrt) * 3
 
             c = x.transaction_month
             e_train = e[c < 9]
@@ -357,16 +359,17 @@ class NeuralNet:
 
     def get_model(self):
         if self.model == None:
-            embsz = 8
+            embsz = 32
 
             def categorical_input(fname, fclasses):
                 vocsz = len(fclasses)
             #     print(vocsz)
                 inp = Input((1,), dtype='int64', name=fname+'_inp')
-                out = Embedding(vocsz, embsz, input_length=1, embeddings_initializer='random_uniform')(inp)
+                emb_init = keras.initializers.RandomUniform(minval=-0.06/embsz, maxval=0.06/embsz)
+                out = Embedding(vocsz, embsz, input_length=1, embeddings_initializer=emb_init)(inp)
                 out = Flatten(name=fname+'_flt')(out)
-                if fname == 'parcelid':
-                    out = Dropout(0.9)(out)
+                # if fname == 'parcelid':
+                #    out = Dropout(0.9)(out)
                 out = Dense(1, name=fname+'_den', activation='relu')(out)
                 return inp, out
 
@@ -384,9 +387,10 @@ class NeuralNet:
             err_dev_in = Input((1,), dtype='float32', name='err_dev_inp')
 
             den = concatenate([ o for _, o in cat_in ] + [ o for _, o in con_in ])
-            den = Dropout(0.2)(den)
-            den = Dense(256, activation='relu', kernel_initializer='random_uniform')(den)
-            den = Dense(256, activation='relu', kernel_initializer='random_uniform')(den)
+            den = Dropout(0.01)(den)
+            den = Dense(1024, activation='relu', kernel_initializer='random_uniform')(den)
+            den = Dense(1024, activation='relu', kernel_initializer='random_uniform')(den)
+            den = Dense(1024, activation='relu', kernel_initializer='random_uniform')(den)
             den = Dense(1, activation='linear')(den)
             # den = Dense(1, activation='linear')(den)
             out = multiply([den, err_dev_in])
@@ -394,6 +398,7 @@ class NeuralNet:
 
             model = Model(inputs=[ i for i, _ in cat_in ] + [ i for i, _ in con_in ] + [ err_ave_in, err_dev_in ], outputs=[den])
             opt = keras.optimizers.Adam(lr=0.001, decay=0.05)
+            model.summary()
             model.compile(loss='mean_absolute_error', optimizer=opt)
 
             self.model = model
@@ -401,14 +406,20 @@ class NeuralNet:
 
         return self.model
 
-    def train(self, epochs=5):
+    def train(self, epochs=5, callbacks=None, verbose=1):
         x_train, x_valid, x_test, y_train, y_valid, y_test = self.training()
-        hist = self.get_model().fit(x_train, y_train, batch_size=256, epochs=epochs, verbose=1, validation_data=(x_valid, y_valid))
+        hist = self.get_model().fit(x_train, y_train, batch_size=256, epochs=epochs, verbose=verbose, callbacks=callbacks, validation_data=(x_valid, y_valid))
         preds = self.get_model().predict(x_test)
         print (preds)
         mae = mean_absolute_error(y_test, preds)
         return mae
 
+    def test(self):
+        x_train, x_valid, x_test, y_train, y_valid, y_test = self.training()
+        preds = self.get_model().predict(x_test)
+        print (preds)
+        mae = mean_absolute_error(y_test, preds)
+        return mae
 #------------------------------------------------------------------------------
 #------------------------------------------------------------------------------
 
