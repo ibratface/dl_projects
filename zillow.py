@@ -12,8 +12,13 @@ import keras
 from keras import initializers
 from keras.layers import Input, Embedding, Dense, Flatten, Dropout
 from keras.models import Model
-from keras.layers.merge import concatenate, multiply, add
+from keras.layers.merge import concatenate, multiply, add, average, maximum, dot
 from keras.layers.advanced_activations import LeakyReLU
+from keras.layers.pooling import GlobalAveragePooling1D
+from keras.layers.normalization import BatchNormalization
+from keras.layers.noise import GaussianNoise
+
+import scipy
 
 CATEGORY_DEFAULT = ''
 CATEGORY_DTYPE = 'str'
@@ -34,6 +39,7 @@ class DataPreprocessor:
         self.train = None
         self.lm = linear_model.Ridge(alpha = .5)
         self.trend = None
+        self.error = None
 
     def transactions(self):
         if self.trxns is None:
@@ -60,6 +66,8 @@ class DataPreprocessor:
         if self.train is None:
             self.train = from_pickle('zillow/train.pkl')
             self.trend = from_pickle('zillow/trend.pkl')
+            self.error_month = from_pickle('zillow/error_month.pkl')
+            self.error_fips_month = from_pickle('zillow/error_fips_month.pkl')
 
         if self.train is None:
             trn = self.transactions()
@@ -68,7 +76,9 @@ class DataPreprocessor:
 
             self.trend = self.forecast_logerror(mrg)
             to_pickle(self.trend, 'zillow/trend.pkl')
-
+            to_pickle(self.error_month, 'zillow/error_month.pkl')
+            to_pickle(self.error_fips_month, 'zillow/error_fips_month.pkl')
+            
             mrg = mrg.merge(self.trend, how='left', on=['fips', 'transaction_month'])
 
             self.train = mrg
@@ -81,10 +91,20 @@ class DataPreprocessor:
         preds = self.properties().copy()
         gc.collect()
         preds.insert(0, 'transaction_month', month)
-        preds = preds.merge(self.error_trend(), how='left', on=['fips', 'transaction_month'])
+        preds = preds.merge(self.error_trend(), how='left', on=['fips', 'transaction_month']).fillna(0)
         gc.collect()
         return preds
 
+    def error_month(self):
+        if self.error_month is None:
+            self.tranining()
+        return self.error_month
+
+    def error_fips_month(self):
+        if self.error_fips_month is None:
+            self.tranining()
+        return self.error_fips_month
+    
     def error_trend(self):
         if self.trend is None:
             self.training()
@@ -118,34 +138,49 @@ class DataPreprocessor:
 #------------------------------------------------------------------------------
 
     def forecast_logerror(self, df):
-        month = self.preprocess_logerror(df, ['transaction_month'], '_month_ave', '_month_std').reset_index()
+        month = self.preprocess_logerror(df, ['transaction_month'], '_month').reset_index()
+        self.error_month = month
         # month = month.append(self.forecast_month(month))
         month = self.forecast_month(month)
-        # month['logerror_month_ave'] = month['logerror_month_ave'].mean()
         month = month.reset_index(drop=True)
 
-        fips_month = self.preprocess_logerror(df, ['fips', 'transaction_month'], '_fips_month_ave', '_fips_month_std').reset_index()
+        fips_month = self.preprocess_logerror(df, ['fips', 'transaction_month'], '_fips_month').reset_index()
+        self.error_fips_month = fips_month
         # fips_month = fips_month.append(self.forecast_fips_month(fips_month))
         fips_month = self.forecast_fips_month(fips_month)
         fips_month = fips_month.reset_index(drop=True)
 
         return fips_month.merge(month, how='left', on='transaction_month')
 
-    def preprocess_logerror(self, df, groupby, sfx_ave, sfx_std):
+    def preprocess_logerror(self, df, groupby, sfx):
         l = 'logerror'
         la = 'logerror_abs'
         grouped = df.loc[:, groupby+[l, la]].groupby(groupby)
-        ave = grouped.mean().rename(columns={l: l+sfx_ave, la: la+sfx_ave})
-        std = grouped.var().rename(columns={l: l+sfx_std, la: la+sfx_std})
-        return ave.merge(std, left_index=True, right_index=True)
+        ave = grouped.mean().rename(columns={l: l+sfx+'_ave', la: la+sfx+'_ave'})
+        # med = grouped.median().rename(columns={l: l+sfx+'_med', la: la+sfx+'_med'})
+        std = grouped.std().rename(columns={l: l+sfx+'_std', la: la+sfx+'_std'})
+        var = grouped.var().rename(columns={l: l+sfx+'_var', la: la+sfx+'_var'})
+        combined = ave #.merge(med, left_index=True, right_index=True)
+        combined = combined.merge(std, left_index=True, right_index=True)
+        combined = combined.merge(var, left_index=True, right_index=True)
+        return combined
 
     def forecast(self, df_train, df_preds, xcol, ycol):
         # print(df_train.loc[df_train[xcol]<11, [xcol]])
         # self.lm.fit(df_train.loc[:, [xcol]], df_train.loc[:, [ycol]])
 
         # only use months ealier than october
-        self.lm.fit(df_train.loc[df_train[xcol]<10, [xcol]], df_train.loc[df_train[xcol]<10, [ycol]])
-        df_preds[ycol] = self.lm.predict(df_preds.loc[:, [xcol]])
+        # self.lm.fit(df_train.loc[df_train[xcol]<10, [xcol]], df_train.loc[df_train[xcol]<10, [ycol]])
+        # df_preds[ycol] = self.lm.predict(df_preds.loc[:, [xcol]])
+
+        l = 0.5
+        x = df_train.loc[df_train[xcol]<10][xcol]
+        y = df_train[df_train[xcol]<10][ycol]
+        coefs = np.polyfit(np.exp(-l*x), y, 1)
+        coefs = scipy.optimize.curve_fit(lambda t,a,b: a*np.exp(b*t),  x,  y, p0=(coefs[0], l))
+        # print(coefs)
+        df_preds[ycol] = pd.Series([ coefs[0][0]*np.exp(coefs[0][1]*x) for x in df_preds[xcol] ])
+        
         return df_preds
 
     def forecast_month(self, df_train):
@@ -193,7 +228,10 @@ class DataPreprocessor:
 
         c = 'yearbuilt'
         df[c] = props[c].fillna(2016)
-
+        df['year'] = df[c] - 1801
+        df['age'] = 2017 - df[c]
+        df[c] = df[c].astype('str')        
+        
         c = 'hashottuborspa'
         df[c] = props[c] == True
         df[c] = df[c].astype('bool')
@@ -209,6 +247,30 @@ class DataPreprocessor:
         c = 'propertyzoningdesc'
         df[c] = props[c].fillna(CATEGORY_DEFAULT).astype(CATEGORY_DTYPE)
 
+        c = 'longitude'
+        df[c] = props[c].fillna(0)
+        m = df[c].mean()
+        df['lon_adj'] = (df[c] - m).fillna(0)
+        
+        c = 'latitude'
+        df[c] = props[c].fillna(0)
+        m = df[c].mean()
+        df['lat_adj'] = (df[c] - m).fillna(0)
+        
+        def distance(x, y):
+            return np.sqrt(x**2 + y**2).sum()
+        
+        df['distance'] = distance(df['lon_adj'], df['lat_adj'])
+        
+        loc_fips_mean = props[['longitude', 'latitude', 'fips']].groupby(['fips']).mean().reset_index()
+        loc_fips_mean.columns = ['fips', 'lon_fips_mean', 'lat_fips_mean']
+        
+        df = df.merge(loc_fips_mean, how='left', on='fips').fillna(0)
+        df['lon_adj_fips'] = (df['longitude'] - df['lon_fips_mean']).fillna(0)
+        df['lat_adj_fips'] = (df['latitude'] - df['lat_fips_mean']).fillna(0)
+        df['distance_fips'] = distance(df['lon_adj_fips'], df['lat_adj_fips'])
+        df = df.drop(['lon_fips_mean', 'lat_fips_mean'], axis=1)
+        
         for c in props.columns:
             if c in df.columns:
                 continue
@@ -284,7 +346,7 @@ class NeuralNet:
             self.con_map_fit = con_mapper.fit(self.data.training())
 
             self.mappers = [(self.cat_map_fit, 'int64'), (self.con_map_fit, 'float32'), (self.add_map_fit, 'float32')]
-            # to_pickle(self.mappers, 'zillow/mappers.pkl')
+            to_pickle(self.mappers, 'zillow/mappers.pkl')
 
             gc.collect()
 
@@ -304,26 +366,26 @@ class NeuralNet:
         return x[c < month], x[c == month], x[c > month], y[c < month], y[c == month], y[c > month]
 
     def training(self):
-#        if self.x_train == None:
-#            self.x_train = from_pickle('zillow/x_train.pkl')
-#            self.x_valid = from_pickle('zillow/x_valid.pkl')
-#            self.x_test = from_pickle('zillow/x_test.pkl')
+        if self.x_train is None:
+            self.x_train = from_pickle('zillow/x_train.pkl')
+            self.x_valid = from_pickle('zillow/x_valid.pkl')
+            self.x_test = from_pickle('zillow/x_test.pkl')
 
-#            self.y_train = from_pickle('zillow/y_train.pkl')
-#            self.y_valid = from_pickle('zillow/y_valid.pkl')
-#            self.y_test = from_pickle('zillow/y_test.pkl')
+            self.y_train = from_pickle('zillow/y_train.pkl')
+            self.y_valid = from_pickle('zillow/y_valid.pkl')
+            self.y_test = from_pickle('zillow/y_test.pkl')
 
-        if self.x_train == None:
+        if self.x_train is None:
             x = self.data.training().drop(['logerror', 'logerror_abs'], axis=1)
             y = self.data.training()['logerror']
 
-            e = x[['logerror_month_ave', 'logerror_month_std']]
-            e['logerror_month_std'] = e['logerror_month_std'].apply(np.sqrt) * 3
+#             e = x[['logerror_month_ave', 'logerror_month_std']]
+#             e['logerror_month_std'] = e['logerror_month_std'].apply(np.sqrt) * 3
 
-            c = x.transaction_month
-            e_train = e[c < 9]
-            e_valid = e[c == 9]
-            e_test = e[c > 9]
+#             c = x.transaction_month
+#             e_train = e[c < 9]
+#             e_valid = e[c == 9]
+#             e_test = e[c > 9]
 
             self.x_train, self.x_valid, self.x_test, self.y_train, self.y_valid, self.y_test = self.train_valid_test_split(x, y)
 
@@ -334,21 +396,21 @@ class NeuralNet:
 
 #            print (self.x_test.shape, e_test.as_matrix().shape)
 
-            self.x_train = np.concatenate([self.x_train, e_train.as_matrix()], axis=1)
-            self.x_valid = np.concatenate([self.x_valid, e_valid.as_matrix()], axis=1)
-            self.x_test = np.concatenate([self.x_test, e_test.as_matrix()], axis=1)
+            # self.x_train = np.concatenate([self.x_train, e_train.as_matrix()], axis=1)
+            # self.x_valid = np.concatenate([self.x_valid, e_valid.as_matrix()], axis=1)
+            # self.x_test = np.concatenate([self.x_test, e_test.as_matrix()], axis=1)
 
-            self.x_train = self.feature_split(self.x_train)
-            self.x_valid = self.feature_split(self.x_valid)
-            self.x_test = self.feature_split(self.x_test)
+            # self.x_train = self.feature_split(self.x_train)
+            # self.x_valid = self.feature_split(self.x_valid)
+            # self.x_test = self.feature_split(self.x_test)
 
-#            to_pickle(self.x_train, 'zillow/x_train.pkl')
-#            to_pickle(self.x_valid, 'zillow/x_valid.pkl')
-#            to_pickle(self.x_test, 'zillow/x_test.pkl')
+            to_pickle(self.x_train, 'zillow/x_train.pkl')
+            to_pickle(self.x_valid, 'zillow/x_valid.pkl')
+            to_pickle(self.x_test, 'zillow/x_test.pkl')
 
-#            to_pickle(self.y_train, 'zillow/y_train.pkl')
-#            to_pickle(self.y_valid, 'zillow/y_valid.pkl')
-#            to_pickle(self.y_test, 'zillow/y_test.pkl')
+            to_pickle(self.y_train, 'zillow/y_train.pkl')
+            to_pickle(self.y_valid, 'zillow/y_valid.pkl')
+            to_pickle(self.y_test, 'zillow/y_test.pkl')
 
             gc.collect()
 
@@ -370,34 +432,44 @@ class NeuralNet:
                 out = Flatten(name=fname+'_flt')(out)
                 # if fname == 'parcelid':
                 #    out = Dropout(0.9)(out)
-                out = Dense(1, name=fname+'_den', activation='relu')(out)
+                out = Dense(1, name=fname+'_den', activation='relu', use_bias=False, kernel_initializer='ones')(out)
                 return inp, out
 
             def continuous_input(fname):
                 inp = Input((1,), dtype='float32', name=fname+'_inp')
-                out = Dense(1, name=fname+'_den', activation='relu')(inp)
+                out = Dense(1, name=fname+'_den', activation='relu', use_bias=False, kernel_initializer='ones')(inp)
                 return inp, out
 
+            def dense_stack(inp, dropout, units, layers):
+                # den = Dropout(dropout)(inp)
+                # den = BatchNormalization()(inp)
+                # den = GaussianNoise(1e-5)(inp)
+                den = inp
+                for i in range(layers):
+                    den = Dense(units, activation='relu', kernel_initializer='random_uniform')(den)
+                return den
+            
             self.fit()
             cat_in = [ categorical_input(f[0], f[1].classes_) for f in self.cat_map_fit.features ]
             con_in = [ continuous_input(f[0][0]) for f in self.con_map_fit.features ] +\
             [ continuous_input(f[0][0]) for f in self.add_map_fit.features ]
 
-            err_ave_in = Input((1,), dtype='float32', name='err_ave_inp')
-            err_dev_in = Input((1,), dtype='float32', name='err_dev_inp')
+            # err_ave_in = Input((1,), dtype='float32', name='err_ave_inp')
+            # err_dev_in = Input((1,), dtype='float32', name='err_dev_inp')
 
             den = concatenate([ o for _, o in cat_in ] + [ o for _, o in con_in ])
-            den = Dropout(0.01)(den)
-            den = Dense(1024, activation='relu', kernel_initializer='random_uniform')(den)
-            den = Dense(1024, activation='relu', kernel_initializer='random_uniform')(den)
-            den = Dense(1024, activation='relu', kernel_initializer='random_uniform')(den)
+            # den = Dropout(0.02)(den)
+            # den = Dense(1024, activation='relu', kernel_initializer='random_uniform')(den)
+            # den = Dense(1024, activation='relu', kernel_initializer='random_uniform')(den)
+            # den = Dense(1024, activation='relu', kernel_initializer='random_uniform')(den)
+            den = concatenate([ dense_stack(den, 0.2, 256, 2) for l in range(51) ])
             den = Dense(1, activation='linear')(den)
             # den = Dense(1, activation='linear')(den)
-            out = multiply([den, err_dev_in])
-            out = add([out, err_ave_in])
+            # out = multiply([den, err_dev_in])
+            # out = add([out, err_ave_in])
 
-            model = Model(inputs=[ i for i, _ in cat_in ] + [ i for i, _ in con_in ] + [ err_ave_in, err_dev_in ], outputs=[den])
-            opt = keras.optimizers.Adam(lr=0.001, decay=0.05)
+            model = Model(inputs=[ i for i, _ in cat_in ] + [ i for i, _ in con_in ], outputs=[den])
+            opt = keras.optimizers.Adam(lr=0.001, decay=0.0)
             model.summary()
             model.compile(loss='mean_absolute_error', optimizer=opt)
 
@@ -408,18 +480,49 @@ class NeuralNet:
 
     def train(self, epochs=5, callbacks=None, verbose=1):
         x_train, x_valid, x_test, y_train, y_valid, y_test = self.training()
-        hist = self.get_model().fit(x_train, y_train, batch_size=256, epochs=epochs, verbose=verbose, callbacks=callbacks, validation_data=(x_valid, y_valid))
-        preds = self.get_model().predict(x_test)
+        x = np.concatenate([x_valid, x_test])
+        y = np.concatenate([y_valid, y_test])
+        hist = self.get_model().fit(self.feature_split(x_train), y_train, batch_size=256, epochs=epochs, verbose=verbose, callbacks=callbacks, validation_data=(self.feature_split(x), y), shuffle=True)
+        preds = self.get_model().predict(self.feature_split(x_test))
         print (preds)
         mae = mean_absolute_error(y_test, preds)
         return mae
 
     def test(self):
         x_train, x_valid, x_test, y_train, y_valid, y_test = self.training()
-        preds = self.get_model().predict(x_test)
-        print (preds)
-        mae = mean_absolute_error(y_test, preds)
+        x = np.concatenate([x_valid, x_test])
+        y = np.concatenate([y_valid, y_test])
+        preds = self.get_model().predict(self.feature_split(x))
+        mae = mean_absolute_error(y, preds)
         return mae
+
+    def predict(self, verbose=1):
+        # build the test set
+        subm = pd.DataFrame()
+        subm['ParcelId'] = self.data.properties()['parcelid']
+        months = [10, 11, 12, 22, 23, 24]
+        dates = ['201610', '201611', '201612', '201710', '201711', '201712']
+    #     months = [10]
+    #     dates = ['201610']
+        for month, date in zip(months, dates):
+            print('\nPredicting...', date)
+
+            x = self.data.prediction(month)
+            # print (x.columns)
+            # print (x.isnull().any())
+            # e = x[['logerror_month_ave', 'logerror_month_std']]
+            # e['logerror_month_std'] = e['logerror_month_std'].apply(np.sqrt) * 3
+            x = self.transform(x, self.mappers)
+            # x = np.concatenate([x, e], axis=1)
+            x = self.feature_split(x)
+            
+            subm[date] = self.model.predict(x, verbose=verbose)
+            subm.to_csv('zillow/{}.csv.gz'.format(date), index=False, float_format='%.4f', compression='gzip')
+            del x; gc.collect()
+
+        subm.to_csv('zillow/submission_nn.csv.gz', index=False, float_format='%.4f', compression='gzip')
+        return subm
+    
 #------------------------------------------------------------------------------
 #------------------------------------------------------------------------------
 

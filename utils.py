@@ -1,3 +1,4 @@
+import os
 import pickle
 import pandas as pd
 import numpy as np
@@ -8,7 +9,10 @@ def to_pickle(obj, fname):
     pickle.dump(obj, open(fname, 'wb'))
 
 def from_pickle(fname):
-    return pickle.load(open(fname, 'rb'))
+    f = None
+    if os.path.exists(fname):
+        f = pickle.load(open(fname, 'rb'))
+    return f
 
 # generator function for pulling out items a number at a time
 def batch(s, n):
