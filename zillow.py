@@ -8,6 +8,8 @@ from sklearn.metrics import mean_absolute_error
 
 from sklearn_pandas import DataFrameMapper
 
+import xgboost as xgb
+
 import keras
 from keras import initializers
 from keras.layers import Input, Embedding, Dense, Flatten, Dropout
@@ -40,6 +42,7 @@ class DataPreprocessor:
         self.lm = linear_model.Ridge(alpha = .5)
         self.trend = None
         self.error = None
+        self.preds = None
 
     def transactions(self):
         if self.trxns is None:
@@ -62,7 +65,7 @@ class DataPreprocessor:
             gc.collect()
         return self.props
 
-    def training(self):
+    def training(self, month=9, dropcols=set()):
         if self.train is None:
             self.train = from_pickle('zillow/train.pkl')
             self.trend = from_pickle('zillow/trend.pkl')
@@ -85,11 +88,17 @@ class DataPreprocessor:
             to_pickle(self.train, 'zillow/train.pkl')
             gc.collect()
 
-        return self.train
+        x = self.train.drop(['logerror', 'logerror_abs'], axis=1).drop(dropcols, axis=1)
+        y = self.train['logerror']
+        c = x.transaction_month
+        return x[c < month], x[c == month], x[c > month], y[c < month], y[c == month], y[c > month]        
 
     def prediction(self, month):
-        preds = self.properties().copy()
-        gc.collect()
+        if self.preds is None:
+            self.preds = pd.DataFrame()
+            self.preds['parcelid'] = self.data.submission()['ParcelId']
+            self.preds = self.preds.merge(self.properties(), how='left', on='parcelid')
+        preds = self.preds.copy()
         preds.insert(0, 'transaction_month', month)
         preds = preds.merge(self.error_trend(), how='left', on=['fips', 'transaction_month']).fillna(0)
         gc.collect()
@@ -291,30 +300,60 @@ class DataPreprocessor:
                 df[c] = df[c].astype(CONTINUOUS_DTYPE)
 
         self.props = df
+        gc.collect()
 
 
 #------------------------------------------------------------------------------
 #------------------------------------------------------------------------------
 
 
-class NeuralNet:
+# For pulling in input data
+class DataLoader:
 
-    def __init__(self, data, dropcols=set()):
-        self.data = data
-        self.dropcols = dropcols
+    def __init__(self):
+        self.preprocessed = DataPreprocessor(self)
+        
+        self.props = None
+        self.train = None
+        self.subm = None
 
-        self.x_train = None
-        self.x_valid = None
-        self.x_test = None
+        self.file_train = 'train_2016_v2'
+        self.file_train_pre = 'train.pre'
+        self.file_props = 'properties_2016'
+        self.file_props_pre = 'props.pre'
+        self.file_subm = 'sample_submission'
 
-        self.y_train = None
-        self.y_valid = None
-        self.y_test = None
+    def load(self, f):
+        csv = os.path.join('zillow', f + '.csv')
+        return pd.read_csv(csv)
 
-        self.model = None
+    def properties(self):
+        if self.props is None:
+            self.props = self.load(self.file_props)
+        return self.props
+
+    def transactions(self):
+        if self.train is None:
+            self.train = self.load(self.file_train)
+        return self.train
+
+    def submission(self):
+        if self.subm is None:
+            self.subm = self.load(self.file_subm)
+        return self.subm
+    
+
+#------------------------------------------------------------------------------
+#------------------------------------------------------------------------------
+
+
+class DataTransformer:
+    
+    def __init__(self):
+        self.train = None
         self.mappers = None
 
-    def fit(self):
+    def fit(self, df, dropcols=set()):
         if self.mappers == None:
             self.mappers = from_pickle('zillow/mappers.pkl')
             if self.mappers:
@@ -323,10 +362,7 @@ class NeuralNet:
                 self.add_map_fit = self.mappers[2][0]
 
         if self.mappers == None:
-            df = self.data.training().drop('parcelid', axis=1)
-            df = df.drop(self.dropcols, axis=1)
-
-            rem_cols = set(df.columns) - set(['logerror', 'logerror_abs'])
+            rem_cols = set(df.columns) - set(['logerror', 'logerror_abs', 'parcelid']) - dropcols
             add_cols = set([ c for c in rem_cols if c.startswith('logerror') ] + ['transaction_month'])
             rem_cols = rem_cols - add_cols
             cat_cols = set([ c for c in rem_cols if df[c].dtype.name == 'object' ])
@@ -352,72 +388,154 @@ class NeuralNet:
 
         return self.mappers
 
-    def transform(self, df, mappers):
+    def transform(self, df):
         mapped = []
-        for m, dtype in mappers:
+        for m, dtype in self.mappers:
             mapped.append(m.transform(df).astype(dtype))
-        return np.concatenate(mapped, axis=1)
+        return np.concatenate(mapped, axis=1)    
+    
+    def fit_transform(self, data, dropcols=set()):
+        mappers = self.fit(data.properties(), dropcols)
+        x_train, x_valid, x_test, y_train, y_valid, y_test = data.training()
+        x_train = self.transform(x_train, mappers)
+        x_valid = self.transform(x_valid, mappers)
+        x_test = self.transform(x_test, mappers)
+        gc.collect()
+        return x_train, x_valid, x_test, y_train, y_valid, y_test    
+
+    
+#------------------------------------------------------------------------------
+#------------------------------------------------------------------------------
+
+
+class XGB:
+    
+    def __init__(self, data=DataLoader()):
+        self.data = data
+        self.clf = None
+    
+    def remove_outliers(self, X, y):
+        f = np.abs(y-y.mean())<=(3*y.std())
+        return X[f], y[f]
+
+    def adapt(self, df, dropcols=set()):
+        mustdropcols = set([
+                    'propertyzoningdesc', 
+                    'propertycountylandusecode', 
+                    'censustractandblock',
+                    'rawcensustractandblock',
+                    'parcelid',
+                   ])
+
+        mustdropcols = mustdropcols | set(dropcols)
+        df = df.drop(mustdropcols, axis=1)
+
+        for c in df.columns:
+            if df[c].dtype.name == 'object':
+                df[c] = df[c].replace('',0).astype(np.float32)
+
+        return df
+
+    def train(self, params=None, dropcols=set(), verbose_eval=False):
+        if params is None:
+            params = {
+                'eta': 0.005,
+                'objective': 'reg:linear',
+                'eval_metric': 'mae',
+                'max_depth': 3,
+                'silent': 1,
+                'subsample': 0.75,
+                'colsample_bytree': 0.8,
+                'min_child_weight': 4,
+                'lambda': 2,
+            }        
+        
+        x_train, x_valid, x_test, y_train, y_valid, y_test = self.data.preprocessed.training()
+        
+        # combine train and valid
+        x_train = pd.concat([x_train, x_valid])
+        y_train = pd.concat([y_train, y_valid])
+        x_valid = x_test
+        y_valid = y_test
+        
+        x_train, y_train = self.remove_outliers(x_train, y_train)
+
+        d_train = xgb.DMatrix(self.adapt(x_train, dropcols), label=y_train, silent=True)
+        d_valid = xgb.DMatrix(self.adapt(x_valid, dropcols), label=y_valid, silent=True)
+        # d_test = xgb.DMatrix(self.adapt(x_test), label=y_test, silent=True)
+
+        del x_train, x_valid, x_test; gc.collect()
+
+        watchlist = [(d_train, 'train'), (d_valid, 'valid')]
+        evals_result = {}
+        self.clf = xgb.train(params, d_train, 10000, watchlist, evals_result=evals_result, 
+                             early_stopping_rounds=100, verbose_eval=verbose_eval)
+        del d_train, d_valid; gc.collect()
+
+        print (self.clf.attributes()['best_msg'])
+        return self.clf, evals_result
+
+
+    def predict(self, dropcols=set()):
+        # build the test set
+        subm = pd.DataFrame()
+        months = [10, 11, 12, 22, 23, 24]
+        dates = ['201610', '201611', '201612', '201710', '201711', '201712']
+    #     months = [10]
+    #     dates = ['201610']
+        for month, date in zip(months, dates):
+            print('Predicting...', date)
+
+            merged = zillow_data.preprocessed.prediction(month)
+            subm['ParcelId'] = merged['parcelid']
+            merged = adapt(merged, dropcols)
+
+            dm_test = xgb.DMatrix(merged)
+            del merged; gc.collect()
+            
+            subm[date] = clf.predict(dm_test)
+            del dm_test; gc.collect()
+
+        subm.to_csv('zillow/submission.csv.gz', index=False, float_format='%.4f', compression='gzip')
+        return subm
+
+
+    def importance(self):
+        imp = self.clf.get_fscore()
+        imp = sorted(imp.items(), key=lambda x: x[1])
+
+        df = pd.DataFrame(imp, columns=['feature', 'fscore'])
+        df['fscore'] = df['fscore'] / df['fscore'].sum()
+
+        df.plot(kind='barh', x='feature', y='fscore', legend=False, figsize=(6, 10))
+        plt.title('XGBoost Feature Importance')
+        plt.xlabel('relative importance');
+        return df
+
+
+#------------------------------------------------------------------------------
+#------------------------------------------------------------------------------
+
+
+class NeuralNet:
+
+    def __init__(self, data, dropcols=set()):
+        self.data = data
+        self.dropcols = dropcols
+
+        self.x_train = None
+        self.x_valid = None
+        self.x_test = None
+
+        self.y_train = None
+        self.y_valid = None
+        self.y_test = None
+
+        self.model = None
+        self.mappers = None
 
     def feature_split(self, df):
         return np.split(df, df.shape[1], axis=1)
-
-    def train_valid_test_split(self, x, y, month=9):
-        c = x.transaction_month
-        return x[c < month], x[c == month], x[c > month], y[c < month], y[c == month], y[c > month]
-
-    def training(self):
-        if self.x_train is None:
-            self.x_train = from_pickle('zillow/x_train.pkl')
-            self.x_valid = from_pickle('zillow/x_valid.pkl')
-            self.x_test = from_pickle('zillow/x_test.pkl')
-
-            self.y_train = from_pickle('zillow/y_train.pkl')
-            self.y_valid = from_pickle('zillow/y_valid.pkl')
-            self.y_test = from_pickle('zillow/y_test.pkl')
-
-        if self.x_train is None:
-            x = self.data.training().drop(['logerror', 'logerror_abs'], axis=1)
-            y = self.data.training()['logerror']
-
-#             e = x[['logerror_month_ave', 'logerror_month_std']]
-#             e['logerror_month_std'] = e['logerror_month_std'].apply(np.sqrt) * 3
-
-#             c = x.transaction_month
-#             e_train = e[c < 9]
-#             e_valid = e[c == 9]
-#             e_test = e[c > 9]
-
-            self.x_train, self.x_valid, self.x_test, self.y_train, self.y_valid, self.y_test = self.train_valid_test_split(x, y)
-
-            mappers = self.fit()
-            self.x_train = self.transform(self.x_train, mappers)
-            self.x_valid = self.transform(self.x_valid, mappers)
-            self.x_test = self.transform(self.x_test, mappers)
-
-#            print (self.x_test.shape, e_test.as_matrix().shape)
-
-            # self.x_train = np.concatenate([self.x_train, e_train.as_matrix()], axis=1)
-            # self.x_valid = np.concatenate([self.x_valid, e_valid.as_matrix()], axis=1)
-            # self.x_test = np.concatenate([self.x_test, e_test.as_matrix()], axis=1)
-
-            # self.x_train = self.feature_split(self.x_train)
-            # self.x_valid = self.feature_split(self.x_valid)
-            # self.x_test = self.feature_split(self.x_test)
-
-            to_pickle(self.x_train, 'zillow/x_train.pkl')
-            to_pickle(self.x_valid, 'zillow/x_valid.pkl')
-            to_pickle(self.x_test, 'zillow/x_test.pkl')
-
-            to_pickle(self.y_train, 'zillow/y_train.pkl')
-            to_pickle(self.y_valid, 'zillow/y_valid.pkl')
-            to_pickle(self.y_test, 'zillow/y_test.pkl')
-
-            gc.collect()
-
-        return self.x_train, self.x_valid, self.x_test, self.y_train, self.y_valid, self.y_test
-
-    def prediction(self):
-        pass
 
     def get_model(self):
         if self.model == None:
@@ -522,42 +640,3 @@ class NeuralNet:
 
         subm.to_csv('zillow/submission_nn.csv.gz', index=False, float_format='%.4f', compression='gzip')
         return subm
-    
-#------------------------------------------------------------------------------
-#------------------------------------------------------------------------------
-
-
-# For pulling in input data
-class DataLoader:
-
-    def __init__(self):
-        self.preprocessed = DataPreprocessor(self)
-
-        self.props = None
-        self.train = None
-        self.subm = None
-
-        self.file_train = 'train_2016_v2'
-        self.file_train_pre = 'train.pre'
-        self.file_props = 'properties_2016'
-        self.file_props_pre = 'props.pre'
-        self.file_subm = 'sample_submission'
-
-    def load(self, f):
-        csv = os.path.join('zillow', f + '.csv')
-        return pd.read_csv(csv)
-
-    def properties(self):
-        if self.props is None:
-            self.props = self.load(self.file_props)
-        return self.props
-
-    def transactions(self):
-        if self.train is None:
-            self.train = self.load(self.file_train)
-        return self.train
-
-    def submission(self):
-        if self.subm is None:
-            self.subm = self.load(self.file_subm)
-        return self.subm
