@@ -486,14 +486,14 @@ class XGB:
         for month, date in zip(months, dates):
             print('Predicting...', date)
 
-            merged = zillow_data.preprocessed.prediction(month)
+            merged = self.data.preprocessed.prediction(month)
             subm['ParcelId'] = merged['parcelid']
-            merged = adapt(merged, dropcols)
+            merged = self.adapt(merged, dropcols)
 
             dm_test = xgb.DMatrix(merged)
             del merged; gc.collect()
             
-            subm[date] = clf.predict(dm_test)
+            subm[date] = self.clf.predict(dm_test)
             del dm_test; gc.collect()
 
         subm.to_csv('zillow/submission.csv.gz', index=False, float_format='%.4f', compression='gzip')
