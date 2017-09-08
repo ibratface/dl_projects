@@ -36,9 +36,11 @@ class DataPreprocessor:
 
     def __init__(self, data):
         self.data = data
+        
         self.trxns = None
         self.props = None
         self.train = None
+        
         self.lm = linear_model.Ridge(alpha = .5)
         self.trend = None
         self.error = None
@@ -65,31 +67,31 @@ class DataPreprocessor:
             gc.collect()
         return self.props
 
-    def training(self, month=9, dropcols=set()):
+    def training(self, ycol='logerror', month=9, dropcols=set()):
         if self.train is None:
             self.train = from_pickle('zillow/train.pkl')
-            self.trend = from_pickle('zillow/trend.pkl')
-            self.error_month = from_pickle('zillow/error_month.pkl')
-            self.error_fips_month = from_pickle('zillow/error_fips_month.pkl')
+            # self.trend = from_pickle('zillow/trend.pkl')
+            # self.error_month = from_pickle('zillow/error_month.pkl')
+            # self.error_fips_month = from_pickle('zillow/error_fips_month.pkl')
 
         if self.train is None:
             trn = self.transactions()
             prp = self.properties()
             mrg = trn.merge(prp, how='left', on='parcelid')
 
-            self.trend = self.forecast_logerror(mrg)
-            to_pickle(self.trend, 'zillow/trend.pkl')
-            to_pickle(self.error_month, 'zillow/error_month.pkl')
-            to_pickle(self.error_fips_month, 'zillow/error_fips_month.pkl')
+            # self.trend = self.forecast_logerror(mrg)
+            # to_pickle(self.trend, 'zillow/trend.pkl')
+            # to_pickle(self.error_month, 'zillow/error_month.pkl')
+            # to_pickle(self.error_fips_month, 'zillow/error_fips_month.pkl')
             
-            mrg = mrg.merge(self.trend, how='left', on=['fips', 'transaction_month'])
+            # mrg = mrg.merge(self.trend, how='left', on=['fips', 'transaction_month'])
 
             self.train = mrg
             to_pickle(self.train, 'zillow/train.pkl')
             gc.collect()
 
-        x = self.train.drop(['logerror', 'logerror_abs'], axis=1).drop(dropcols, axis=1)
-        y = self.train['logerror']
+        x = self.train.drop(['logerror', 'logerror_abs', 'logerror_percent'], axis=1).drop(dropcols, axis=1)
+        y = self.train[ycol]
         c = x.transaction_month
         return x[c < month], x[c == month], x[c > month], y[c < month], y[c == month], y[c > month]        
 
@@ -98,11 +100,15 @@ class DataPreprocessor:
             self.preds = pd.DataFrame()
             self.preds['parcelid'] = self.data.submission()['ParcelId']
             self.preds = self.preds.merge(self.properties(), how='left', on='parcelid')
-        preds = self.preds.copy()
-        preds.insert(0, 'transaction_month', month)
-        preds = preds.merge(self.error_trend(), how='left', on=['fips', 'transaction_month']).fillna(0)
+            self.preds.insert(0, 'transaction_month', month)
+        else:
+            self.preds['transaction_month'] = month
+            # dropcols = [ c for c in self.preds.columns if c.startswith('logerror') ] + ['transaction_month']
+            # self.preds.drop(dropcols, inplace=True)
+        # self.preds.insert(0, 'transaction_month', month)
+        # self.preds = preds.merge(self.error_trend(), how='left', on=['fips', 'transaction_month']).fillna(0)
         gc.collect()
-        return preds
+        return self.preds
 
     def error_month(self):
         if self.error_month is None:
@@ -163,11 +169,12 @@ class DataPreprocessor:
     def preprocess_logerror(self, df, groupby, sfx):
         l = 'logerror'
         la = 'logerror_abs'
-        grouped = df.loc[:, groupby+[l, la]].groupby(groupby)
-        ave = grouped.mean().rename(columns={l: l+sfx+'_ave', la: la+sfx+'_ave'})
+        lp = 'logerror_percent'
+        grouped = df.loc[:, groupby+[l, la, lp]].groupby(groupby)
+        ave = grouped.mean().rename(columns={l: l+sfx+'_ave', la: la+sfx+'_ave', lp: lp+sfx+'_ave'})
         # med = grouped.median().rename(columns={l: l+sfx+'_med', la: la+sfx+'_med'})
-        std = grouped.std().rename(columns={l: l+sfx+'_std', la: la+sfx+'_std'})
-        var = grouped.var().rename(columns={l: l+sfx+'_var', la: la+sfx+'_var'})
+        std = grouped.std().rename(columns={l: l+sfx+'_std', la: la+sfx+'_std', lp: lp+sfx+'_std'})
+        var = grouped.var().rename(columns={l: l+sfx+'_var', la: la+sfx+'_var', lp: lp+sfx+'_var'})
         combined = ave #.merge(med, left_index=True, right_index=True)
         combined = combined.merge(std, left_index=True, right_index=True)
         combined = combined.merge(var, left_index=True, right_index=True)
@@ -181,16 +188,16 @@ class DataPreprocessor:
         # self.lm.fit(df_train.loc[df_train[xcol]<10, [xcol]], df_train.loc[df_train[xcol]<10, [ycol]])
         # df_preds[ycol] = self.lm.predict(df_preds.loc[:, [xcol]])
 
-        l = 0.5
+        l = 0.25
         x = df_train[df_train[xcol]<10][xcol]
         y = df_train[df_train[xcol]<10][ycol]
         # x = df_train[xcol]
         # y = df_train[ycol]
         coefs = np.polyfit(np.exp(-l*x), y, 1)
-        coefs = scipy.optimize.curve_fit(lambda t,a,b: a*np.exp(b*t),  x,  y, p0=(coefs[0], l))
+        # coefs = scipy.optimize.curve_fit(lambda t,a,b: a*np.exp(b*t),  x,  y, p0=(coefs[0], l))
         # print(coefs)
-        df_preds[ycol] = pd.Series([ coefs[0][0]*np.exp(coefs[0][1]*x) for x in df_preds[xcol] ])
-        # df_preds[ycol] = pd.Series([ coefs[0]*np.exp(-l*x)+coefs[1] for x in df_preds[xcol] ])
+        # df_preds[ycol] = pd.Series([ coefs[0][0]*np.exp(coefs[0][1]*x) for x in df_preds[xcol] ])
+        df_preds[ycol] = pd.Series([ coefs[0]*np.exp(-l*x)+coefs[1] for x in df_preds[xcol] ])
         
         return df_preds
 
@@ -220,9 +227,15 @@ class DataPreprocessor:
     def preprocess_transactions(self):
         df = self.data.transactions()
 
-        df['logerror_abs'] = df['logerror'].abs()
+        c = 'logerror'
+        df['logerror_percent'] = (np.exp(df[c])-1)*100
+        df['logerror_abs'] = df[c].abs()
         df = self.split_date(df)
-
+        
+        # e_min = df[c].quantile(.01)
+        # e_max = df[c].quantile(.99)
+        # self.trxns = df[(df.logerror >= e_min) & (df.logerror <= e_max)].reset_index(drop=True)
+        
         self.trxns = df
 
     def clean_properties(self):
@@ -589,10 +602,11 @@ class XGB:
         self.data = data
         self.clf = None
     
-    def remove_outliers(self, X, y):
-        t = self.data.transactions()
-        l_min = t['logerror'].quantile(.025)
-        l_max = t['logerror'].quantile(.975)
+    def remove_outliers(self, X, y, ycol):
+        # return X, y
+        t = self.data.preprocessed.transactions()
+        l_min = t[ycol].quantile(.05)
+        l_max = t[ycol].quantile(.95)
         f = (y >= l_min) & (y <= l_max)
         return X[f], y[f]
 
@@ -614,7 +628,7 @@ class XGB:
 
         return df
 
-    def train(self, params=None, dropcols=set(), verbose_eval=False):
+    def train(self, ycol='logerror', params=None, dropcols=set(), verbose_eval=False):
         if params is None:
             params = {
                 'eta': 0.005,
@@ -628,7 +642,7 @@ class XGB:
                 'lambda': 2,
             }        
         
-        x_train, x_valid, x_test, y_train, y_valid, y_test = self.data.preprocessed.training()
+        x_train, x_valid, x_test, y_train, y_valid, y_test = self.data.preprocessed.training(ycol=ycol)
         
         # combine train and valid
         x_train = pd.concat([x_train, x_valid])
@@ -636,7 +650,8 @@ class XGB:
         x_valid = x_test
         y_valid = y_test
         
-        x_train, y_train = self.remove_outliers(x_train, y_train)
+        x_train, y_train = self.remove_outliers(x_train, y_train, ycol)
+        # x_valid, y_valid = self.remove_outliers(x_valid, y_valid, ycol)
 
         d_train = xgb.DMatrix(self.adapt(x_train, dropcols), label=y_train, silent=True)
         d_valid = xgb.DMatrix(self.adapt(x_valid, dropcols), label=y_valid, silent=True)
@@ -647,7 +662,7 @@ class XGB:
         watchlist = [(d_train, 'train'), (d_valid, 'valid')]
         evals_result = {}
         self.clf = xgb.train(params, d_train, 10000, watchlist, evals_result=evals_result, 
-                             early_stopping_rounds=100, verbose_eval=verbose_eval)
+                             early_stopping_rounds=200, verbose_eval=verbose_eval)
         del d_train, d_valid; gc.collect()
 
         print (self.clf.attributes()['best_msg'])
