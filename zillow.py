@@ -36,9 +36,11 @@ class DataPreprocessor:
 
     def __init__(self, data):
         self.data = data
+        
         self.trxns = None
         self.props = None
         self.train = None
+        
         self.lm = linear_model.Ridge(alpha = .5)
         self.trend = None
         self.error = None
@@ -65,44 +67,46 @@ class DataPreprocessor:
             gc.collect()
         return self.props
 
-    def training(self, month=9, dropcols=set()):
+    def training(self, ycol='logerror', month=9, dropcols=set()):
         if self.train is None:
             self.train = from_pickle('zillow/train.pkl')
-            self.trend = from_pickle('zillow/trend.pkl')
-            self.error_month = from_pickle('zillow/error_month.pkl')
-            self.error_fips_month = from_pickle('zillow/error_fips_month.pkl')
+            # self.trend = from_pickle('zillow/trend.pkl')
+            # self.error_month = from_pickle('zillow/error_month.pkl')
+            # self.error_fips_month = from_pickle('zillow/error_fips_month.pkl')
 
         if self.train is None:
             trn = self.transactions()
             prp = self.properties()
             mrg = trn.merge(prp, how='left', on='parcelid')
-
-            self.trend = self.forecast_logerror(mrg)
-            to_pickle(self.trend, 'zillow/trend.pkl')
-            to_pickle(self.error_month, 'zillow/error_month.pkl')
-            to_pickle(self.error_fips_month, 'zillow/error_fips_month.pkl')
+            del trn, prp; gc.collect()
             
-            mrg = mrg.merge(self.trend, how='left', on=['fips', 'transaction_month'])
+            # self.trend = self.forecast_logerror(mrg)
+            # to_pickle(self.trend, 'zillow/trend.pkl')
+            # to_pickle(self.error_month, 'zillow/error_month.pkl')
+            # to_pickle(self.error_fips_month, 'zillow/error_fips_month.pkl')
+            
+            # mrg = mrg.merge(self.trend, how='left', on=['fips', 'transaction_month'])
 
             self.train = mrg
             to_pickle(self.train, 'zillow/train.pkl')
             gc.collect()
 
-        x = self.train.drop(['logerror', 'logerror_abs'], axis=1).drop(dropcols, axis=1)
-        y = self.train['logerror']
-        c = x.transaction_month
-        return x[c < month], x[c == month], x[c > month], y[c < month], y[c == month], y[c > month]        
+        return self.train
 
     def prediction(self, month):
         if self.preds is None:
             self.preds = pd.DataFrame()
             self.preds['parcelid'] = self.data.submission()['ParcelId']
             self.preds = self.preds.merge(self.properties(), how='left', on='parcelid')
-        preds = self.preds.copy()
-        preds.insert(0, 'transaction_month', month)
-        preds = preds.merge(self.error_trend(), how='left', on=['fips', 'transaction_month']).fillna(0)
+            self.preds.insert(0, 'transaction_month', month)
+        else:
+            self.preds['transaction_month'] = month
+            # dropcols = [ c for c in self.preds.columns if c.startswith('logerror') ] + ['transaction_month']
+            # self.preds.drop(dropcols, inplace=True)
+        # self.preds.insert(0, 'transaction_month', month)
+        # self.preds = preds.merge(self.error_trend(), how='left', on=['fips', 'transaction_month']).fillna(0)
         gc.collect()
-        return preds
+        return self.preds
 
     def error_month(self):
         if self.error_month is None:
@@ -163,11 +167,12 @@ class DataPreprocessor:
     def preprocess_logerror(self, df, groupby, sfx):
         l = 'logerror'
         la = 'logerror_abs'
-        grouped = df.loc[:, groupby+[l, la]].groupby(groupby)
-        ave = grouped.mean().rename(columns={l: l+sfx+'_ave', la: la+sfx+'_ave'})
+        lp = 'logerror_percent'
+        grouped = df.loc[:, groupby+[l, la, lp]].groupby(groupby)
+        ave = grouped.mean().rename(columns={l: l+sfx+'_ave', la: la+sfx+'_ave', lp: lp+sfx+'_ave'})
         # med = grouped.median().rename(columns={l: l+sfx+'_med', la: la+sfx+'_med'})
-        std = grouped.std().rename(columns={l: l+sfx+'_std', la: la+sfx+'_std'})
-        var = grouped.var().rename(columns={l: l+sfx+'_var', la: la+sfx+'_var'})
+        std = grouped.std().rename(columns={l: l+sfx+'_std', la: la+sfx+'_std', lp: lp+sfx+'_std'})
+        var = grouped.var().rename(columns={l: l+sfx+'_var', la: la+sfx+'_var', lp: lp+sfx+'_var'})
         combined = ave #.merge(med, left_index=True, right_index=True)
         combined = combined.merge(std, left_index=True, right_index=True)
         combined = combined.merge(var, left_index=True, right_index=True)
@@ -181,16 +186,16 @@ class DataPreprocessor:
         # self.lm.fit(df_train.loc[df_train[xcol]<10, [xcol]], df_train.loc[df_train[xcol]<10, [ycol]])
         # df_preds[ycol] = self.lm.predict(df_preds.loc[:, [xcol]])
 
-        l = 0.5
+        l = 0.25
         x = df_train[df_train[xcol]<10][xcol]
         y = df_train[df_train[xcol]<10][ycol]
         # x = df_train[xcol]
         # y = df_train[ycol]
         coefs = np.polyfit(np.exp(-l*x), y, 1)
-        coefs = scipy.optimize.curve_fit(lambda t,a,b: a*np.exp(b*t),  x,  y, p0=(coefs[0], l))
+        # coefs = scipy.optimize.curve_fit(lambda t,a,b: a*np.exp(b*t),  x,  y, p0=(coefs[0], l))
         # print(coefs)
-        df_preds[ycol] = pd.Series([ coefs[0][0]*np.exp(coefs[0][1]*x) for x in df_preds[xcol] ])
-        # df_preds[ycol] = pd.Series([ coefs[0]*np.exp(-l*x)+coefs[1] for x in df_preds[xcol] ])
+        # df_preds[ycol] = pd.Series([ coefs[0][0]*np.exp(coefs[0][1]*x) for x in df_preds[xcol] ])
+        df_preds[ycol] = pd.Series([ coefs[0]*np.exp(-l*x)+coefs[1] for x in df_preds[xcol] ])
         
         return df_preds
 
@@ -220,9 +225,15 @@ class DataPreprocessor:
     def preprocess_transactions(self):
         df = self.data.transactions()
 
-        df['logerror_abs'] = df['logerror'].abs()
+        c = 'logerror'
+        df['logerror_percent'] = (np.exp(df[c])-1)*100
+        df['logerror_abs'] = df[c].abs()
         df = self.split_date(df)
-
+        
+        # e_min = df[c].quantile(.01)
+        # e_max = df[c].quantile(.99)
+        # self.trxns = df[(df.logerror >= e_min) & (df.logerror <= e_max)].reset_index(drop=True)
+        
         self.trxns = df
 
     def clean_properties(self):
@@ -354,15 +365,22 @@ class DataPreprocessor:
         cln[c] = p[c].fillna(0).astype('float32')
         c = 'taxamount'
         cln[c] = p[c].fillna(0).astype('float32')
+        
         c = 'assessmentyear'
         cln[c] = p[c].fillna(2017).astype('int')
+        cln['assessmentyear_age'] = 2017 - cln[c]
+        cln[c].astype('str')
+        
         c = 'taxdelinquencyflag'
         cln[c] = p[c] == 'Y'
+        
         c = 'taxdelinquencyyear'
         cln[c] = p[c]
         cln.loc[p[c] < 70, c] = cln[p[c] < 70][c] + 2000
         cln.loc[p[c] >= 70, c] = cln[p[c] >= 70][c] + 1900
         cln[c] = cln[c].fillna(2016).astype('int')
+        cln['taxdelinquencyyear_age'] = 2017 - cln[c]
+        cln[c].astype('str')
 
         c = 'censustractandblock'
         cln[c] = p[c].astype('str').replace('nan', '0')
@@ -400,82 +418,7 @@ class DataPreprocessor:
         cln = cln.drop(['longitude_fips_mean', 'latitude_fips_mean'], axis=1)
         
         self.props = cln
-        return cln
-        
-    def preprocess_properties(self):
-        df = pd.DataFrame()
-        props = self.data.properties()
-
-        c = 'rawcensustractandblock'
-        df[c] = props[c]
-        df = self.split_census(df)
-
-        c = 'yearbuilt'
-        df[c] = props[c].fillna(2016)
-        df['year'] = df[c] - 1801
-        df['age'] = 2017 - df[c]
-        df[c] = df[c].astype('str')        
-        
-        c = 'hashottuborspa'
-        df[c] = props[c] == True
-        df[c] = df[c].astype('bool')
-
-        c = 'taxdelinquencyflag'
-        df[c] = props[c].astype('str')
-        df[c] = df[c] == 'Y'
-        df[c] = df[c].astype('bool')
-
-        c = 'propertycountylandusecode'
-        df[c] = props[c].fillna(CATEGORY_DEFAULT).astype(CATEGORY_DTYPE)
-
-        c = 'propertyzoningdesc'
-        df[c] = props[c].fillna(CATEGORY_DEFAULT).astype(CATEGORY_DTYPE)
-
-        c = 'longitude'
-        df[c] = props[c].fillna(0)
-        m = df[c].mean()
-        df['lon_adj'] = (df[c] - m).fillna(0)
-        
-        c = 'latitude'
-        df[c] = props[c].fillna(0)
-        m = df[c].mean()
-        df['lat_adj'] = (df[c] - m).fillna(0)
-        
-        def distance(x, y):
-            return np.sqrt(x**2 + y**2).sum()
-        
-        df['distance'] = distance(df['lon_adj'], df['lat_adj'])
-        
-        loc_fips_mean = props[['longitude', 'latitude', 'fips']].groupby(['fips']).mean().reset_index()
-        loc_fips_mean.columns = ['fips', 'lon_fips_mean', 'lat_fips_mean']
-        
-        df = df.merge(loc_fips_mean, how='left', on='fips').fillna(0)
-        df['lon_adj_fips'] = (df['longitude'] - df['lon_fips_mean']).fillna(0)
-        df['lat_adj_fips'] = (df['latitude'] - df['lat_fips_mean']).fillna(0)
-        df['distance_fips'] = distance(df['lon_adj_fips'], df['lat_adj_fips'])
-        df = df.drop(['lon_fips_mean', 'lat_fips_mean'], axis=1)
-        
-        for c in props.columns:
-            if c in df.columns:
-                continue
-
-            if 'typeid' in c or 'regionid' in c:
-                df[c] = props[c].fillna(CATEGORY_DEFAULT).astype(CATEGORY_DTYPE)
-            elif props[c].dtype == np.object:
-                df[c] = props[c] == True
-                df[c] = df[c].astype('bool')
-            else:
-                df[c] = props[c]
-
-            if df[c].dtype == np.float64:
-                # if (props[c] == CONTINUOUS_DEFAULT).any():
-                #     df[c] = props[c].fillna(props[c].mean())
-                # else:
-                df[c] = props[c].fillna(CONTINUOUS_DEFAULT)
-                df[c] = df[c].astype(CONTINUOUS_DTYPE)
-
-        self.props = df
-        gc.collect()
+        return cln       
 
 
 #------------------------------------------------------------------------------
@@ -589,10 +532,11 @@ class XGB:
         self.data = data
         self.clf = None
     
-    def remove_outliers(self, X, y):
-        t = self.data.transactions()
-        l_min = t['logerror'].quantile(.025)
-        l_max = t['logerror'].quantile(.975)
+    def remove_outliers(self, X, y, ycol):
+        # return X, y
+        t = self.data.preprocessed.transactions()
+        l_min = t[ycol].quantile(.05)
+        l_max = t[ycol].quantile(.95)
         f = (y >= l_min) & (y <= l_max)
         return X[f], y[f]
 
@@ -614,7 +558,7 @@ class XGB:
 
         return df
 
-    def train(self, params=None, dropcols=set(), verbose_eval=False):
+    def train(self, ycol='logerror', params=None, dropcols=set(), verbose_eval=False):
         if params is None:
             params = {
                 'eta': 0.005,
@@ -628,7 +572,7 @@ class XGB:
                 'lambda': 2,
             }        
         
-        x_train, x_valid, x_test, y_train, y_valid, y_test = self.data.preprocessed.training()
+        x_train, x_valid, x_test, y_train, y_valid, y_test = self.data.preprocessed.training(ycol=ycol)
         
         # combine train and valid
         x_train = pd.concat([x_train, x_valid])
@@ -636,7 +580,8 @@ class XGB:
         x_valid = x_test
         y_valid = y_test
         
-        x_train, y_train = self.remove_outliers(x_train, y_train)
+        x_train, y_train = self.remove_outliers(x_train, y_train, ycol)
+        # x_valid, y_valid = self.remove_outliers(x_valid, y_valid, ycol)
 
         d_train = xgb.DMatrix(self.adapt(x_train, dropcols), label=y_train, silent=True)
         d_valid = xgb.DMatrix(self.adapt(x_valid, dropcols), label=y_valid, silent=True)
@@ -647,7 +592,7 @@ class XGB:
         watchlist = [(d_train, 'train'), (d_valid, 'valid')]
         evals_result = {}
         self.clf = xgb.train(params, d_train, 10000, watchlist, evals_result=evals_result, 
-                             early_stopping_rounds=100, verbose_eval=verbose_eval)
+                             early_stopping_rounds=200, verbose_eval=verbose_eval)
         del d_train, d_valid; gc.collect()
 
         print (self.clf.attributes()['best_msg'])
