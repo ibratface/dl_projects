@@ -53,7 +53,6 @@ class DataPreprocessor:
         if self.trxns is None:
             self.preprocess_transactions()
             to_pickle(self.trxns, 'zillow/trxns.pkl')
-            gc.collect()
 
         return self.trxns
 
@@ -64,7 +63,7 @@ class DataPreprocessor:
         if self.props is None:
             self.clean_properties()
             to_pickle(self.props, 'zillow/props.pkl')
-            gc.collect()
+
         return self.props
 
     def training(self, ycol='logerror', month=9, dropcols=set()):
@@ -78,6 +77,7 @@ class DataPreprocessor:
             trn = self.transactions()
             prp = self.properties()
             mrg = trn.merge(prp, how='left', on='parcelid')
+            self.data.clear()
             del trn, prp; gc.collect()
             
             # self.trend = self.forecast_logerror(mrg)
@@ -141,6 +141,7 @@ class DataPreprocessor:
         df[txd] = pd.to_datetime(df[txd])
         # df[datecol+'_year'] = df[datecol].dt.year
         df['transaction_month'] = df[txd].dt.month
+        df['transaction_month'] = df['transaction_month'].astype('str')
         # df[datecol+'_week'] = df[datecol].dt.week
         # df[datecol+'_day'] = df[datecol].dt.day
         # df[datecol+'_dayofweek'] = df[datecol].dt.dayofweek
@@ -431,9 +432,7 @@ class DataLoader:
     def __init__(self):
         self.preprocessed = DataPreprocessor(self)
         
-        self.props = None
-        self.train = None
-        self.subm = None
+        self.clear()
 
         self.file_train = 'train_2016_v2'
         self.file_train_pre = 'train.pre'
@@ -460,6 +459,11 @@ class DataLoader:
             self.subm = self.load(self.file_subm)
         return self.subm
     
+    def clear(self):
+        self.props = None
+        self.train = None
+        self.subm = None
+        gc.collect()
 
 #------------------------------------------------------------------------------
 #------------------------------------------------------------------------------
@@ -681,14 +685,14 @@ class NeuralNet:
                 out = Dense(1, name=fname+'_den', activation='relu', use_bias=False, kernel_initializer='ones')(inp)
                 return inp, out
 
-            def dense_stack(inp, dropout, units, layers):
-                # den = Dropout(dropout)(inp)
-                # den = BatchNormalization()(inp)
-                # den = GaussianNoise(1e-5)(inp)
-                den = inp
+            def dense_stack(inp, layers, units, dropout):
+                den = Dropout(dropout)(inp)
                 for i in range(layers):
                     den = Dense(units, activation='relu', kernel_initializer='random_uniform')(den)
                 return den
+            
+            def dense_weave(inp, threads, layers, units, dropout):
+                return [ dense_stack(inp, layers, units, dropout) for t in range(threads) ]
             
             self.fit()
             cat_in = [ categorical_input(f[0], f[1].classes_) for f in self.cat_map_fit.features ]
@@ -702,8 +706,10 @@ class NeuralNet:
             # den = Dropout(0.02)(den)
             # den = Dense(1024, activation='relu', kernel_initializer='random_uniform')(den)
             # den = Dense(1024, activation='relu', kernel_initializer='random_uniform')(den)
-            # den = Dense(1024, activation='relu', kernel_initializer='random_uniform')(den)
-            den = concatenate([ dense_stack(den, 0.2, 256, 2) for l in range(51) ])
+            den = concatenate(dense_stack(den, 16, 2, 1) + 
+                              dense_stack(den, 8, 2, 2) + 
+                              dense_stack(den, 4, 2, 4) + 
+                              dense_stack(den, 2, 2, 8))
             den = Dense(1, activation='linear')(den)
             # den = Dense(1, activation='linear')(den)
             # out = multiply([den, err_dev_in])
