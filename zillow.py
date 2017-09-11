@@ -623,7 +623,7 @@ class XGB:
             subm[date] = self.clf.predict(dm_test)
             del dm_test; gc.collect()
 
-        subm.to_csv('zillow/submission.csv.gz', index=False, float_format='%.4f', compression='gzip')
+        subm.to_csv('zillow/submission.xgb.csv.gz', index=False, float_format='%.4f', compression='gzip')
         return subm
 
 
