@@ -95,10 +95,16 @@ class DataPreprocessor:
 
     def prediction(self, month):
         if self.preds is None:
+            self.train = None
+            gc.collect()
+            
             self.preds = pd.DataFrame()
             self.preds['parcelid'] = self.data.submission()['ParcelId']
             self.preds = self.preds.merge(self.properties(), how='left', on='parcelid')
             self.preds.insert(0, 'transaction_month', month)
+            
+            self.props = None
+            gc.collect()
         else:
             self.preds['transaction_month'] = month
             # dropcols = [ c for c in self.preds.columns if c.startswith('logerror') ] + ['transaction_month']
