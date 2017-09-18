@@ -45,6 +45,8 @@ class DataPreprocessor:
         self.trend = None
         self.error = None
         self.preds = None
+        
+        self.categories = []
 
     def transactions(self):
         if self.trxns is None:
@@ -134,11 +136,12 @@ class DataPreprocessor:
     def split_census(self, df):
         c = 'rawcensustractandblock'
         df[c] = df[c].astype('str')
-        df['fips'] = df[c].str.slice(0, 4).replace('nan', 0).astype(CATEGORY_DTYPE)
-        df['tract'] = df[c].str.slice(4, 11).replace('', 0).astype(CATEGORY_DTYPE)
-        df['block'] = df[c].str.slice(11).replace('', 0).astype(CATEGORY_DTYPE)
-        df[c] = df[c].astype(CATEGORY_DTYPE)
-        # df.loc[:, ('fips', 'tract', 'block')].head().transpose()
+        df['fips'] = df[c].str.slice(0, 4).replace('nan', '')
+        df['tract'] = df[c].str.slice(4, 11)
+        df['block'] = df[c].str.slice(11)
+        self.categories.append('fips')
+        self.categories.append('tract')
+        self.categories.append('block')
         return df
 
     # utility function for splitting the date into components
@@ -147,7 +150,7 @@ class DataPreprocessor:
         df[txd] = pd.to_datetime(df[txd])
         # df[datecol+'_year'] = df[datecol].dt.year
         df['transaction_month'] = df[txd].dt.month
-        df['transaction_month'] = df['transaction_month'].astype('str')
+        df['transaction_month'] = df['transaction_month']
         # df[datecol+'_week'] = df[datecol].dt.week
         # df[datecol+'_day'] = df[datecol].dt.day
         # df[datecol+'_dayofweek'] = df[datecol].dt.dayofweek
@@ -243,6 +246,105 @@ class DataPreprocessor:
         
         self.trxns = df
 
+    # from Nikunj
+    # Creating Additional Features
+    def add_features(self, df_train):
+        #error in calculation of the finished living area of home
+        # c = 'N-LivingAreaError'
+        # df_train[c] = (df_train['calculatedfinishedsquarefeet'].astype(float) / (df_train['finishedsquarefeet12'].astype(float) + 0.001))
+        # df_train[c] = df_train[c].replace(np.inf, df_train[c].mean(), inplace=True)
+        # df_train[c] = df_train[c].fillna(df_train[c].mean(), inplace=True)
+
+        #proportion of living area
+        df_train['N-LivingAreaProp'] = df_train['calculatedfinishedsquarefeet']/df_train['lotsizesquarefeet']
+        # df_train['N-LivingAreaProp2'] = (df_train['finishedsquarefeet12']/df_train['finishedsquarefeet15'])
+        # df_train['N-LivingAreaProp2'] = df_train['N-LivingAreaProp2'].fillna(df_train['N-LivingAreaProp2'].mean(), inplace=True)
+        # df_train['N-LivingAreaProp2'] = df_train['N-LivingAreaProp2'].replace(np.inf, df_train['N-LivingAreaProp2'].mean(), inplace=True)
+
+        #Amout of extra space
+        df_train['N-ExtraSpace'] = df_train['lotsizesquarefeet'] - df_train['calculatedfinishedsquarefeet'] 
+        df_train['N-ExtraSpace-2'] = df_train['finishedsquarefeet15'] - df_train['finishedsquarefeet12'] 
+
+        #Total number of rooms
+        df_train['N-TotalRooms'] = df_train['bathroomcnt'] + df_train['bedroomcnt']
+
+        #Average room size
+        # df_train['N-AvRoomSize'] = df_train['calculatedfinishedsquarefeet'] / df_train['roomcnt'] 
+        # df_train['N-AvRoomSize'] = df_train['N-AvRoomSize'].fillna(df_train['N-AvRoomSize'].mean(), inplace=True)
+        # df_train['N-AvRoomSize'] = df_train['N-AvRoomSize'].replace(np.inf, df_train['N-AvRoomSize'].mean(), inplace=True)
+
+        # Number of Extra rooms
+        df_train['N-ExtraRooms'] = df_train['roomcnt'] - df_train['N-TotalRooms'] 
+
+        #Ratio of the built structure value to land area
+        # df_train['N-ValueProp'] = df_train['structuretaxvaluedollarcnt']/df_train['landtaxvaluedollarcnt']
+
+        #Does property have a garage, pool or hot tub and AC?
+        df_train['N-GarPoolAC'] = ((df_train['garagecarcnt']>0) & (df_train['pooltypeid10'].astype(int)>0) &\
+                                   (df_train['airconditioningtypeid'].astype(int)!=5))*1 
+
+        df_train["N-location"] = df_train["latitude"] + df_train["longitude"]
+        df_train["N-location-2"] = df_train["latitude"] * df_train["longitude"]
+        df_train["N-location-2round"] = df_train["N-location-2"].round(-4)
+
+        df_train["N-latitude-round"] = df_train["latitude"].round(-4)
+        df_train["N-longitude-round"] = df_train["longitude"].round(-4)
+        
+        #Ratio of tax of property over parcel
+        # df_train['N-ValueRatio'] = df_train['taxvaluedollarcnt'] / df_train['taxamount']
+        # df_train['N-ValueRatio'] = df_train['N-ValueRatio'].replace(np.inf, df_train['N-ValueRatio'].mean(), inplace=True)
+
+        #TotalTaxScore
+        df_train['N-TaxScore'] = df_train['taxvaluedollarcnt'] * df_train['taxamount']
+
+        #polnomials of tax delinquency year
+        df_train["N-taxdelinquencyyear-2"] = df_train["taxdelinquencyyear"] ** 2
+        df_train["N-taxdelinquencyyear-3"] = df_train["taxdelinquencyyear"] ** 3
+
+        #Length of time since unpaid taxes
+        df_train['N-life'] = 2018 - df_train['taxdelinquencyyear']
+        
+        #Number of properties in the zip
+        zip_count = df_train['regionidzip'].value_counts().to_dict()
+        df_train['N-zip_count'] = df_train['regionidzip'].map(zip_count)
+
+        #Number of properties in the city
+        city_count = df_train['regionidcity'].value_counts().to_dict()
+        df_train['N-city_count'] = df_train['regionidcity'].map(city_count)
+
+        #Number of properties in the city
+        region_count = df_train['regionidcounty'].value_counts().to_dict()
+        df_train['N-county_count'] = df_train['regionidcounty'].map(region_count)
+
+        #Indicator whether it has AC or not
+        df_train['N-ACInd'] = (df_train['airconditioningtypeid'].astype(int)!=5)*1
+
+        #Indicator whether it has Heating or not 
+        df_train['N-HeatInd'] = (df_train['heatingorsystemtypeid'].astype(int)!=13)*1
+
+        #There's 25 different property uses - let's compress them down to 4 categories
+        c = 'N-PropType'
+        df_train[c] = df_train.propertylandusetypeid.astype(float).replace(
+            {31 : "Mixed", 46 : "Other", 47 : "Mixed", 246 : "Mixed", 247 : "Mixed", 248 : "Mixed", 260 : "Home", 261 : "Home", 
+             262 : "Home", 263 : "Home", 264 : "Home", 265 : "Home", 266 : "Home", 267 : "Home", 268 : "Home", 269 : "Not Built", 
+             270 : "Home", 271 : "Home", 273 : "Home", 274 : "Other", 275 : "Home", 276 : "Home", 279 : "Home", 290 : "Not Built", 
+             291 : "Not Built" })
+        self.categories.append(c)
+        
+        #polnomials of the variable
+        df_train["N-structuretaxvaluedollarcnt-2"] = df_train["structuretaxvaluedollarcnt"] ** 2
+        # df_train["N-structuretaxvaluedollarcnt-3"] = df_train["structuretaxvaluedollarcnt"] ** 3
+
+        #Average structuretaxvaluedollarcnt by city
+        group = df_train.groupby('regionidcity')['structuretaxvaluedollarcnt'].aggregate('mean').to_dict()
+        df_train['N-Avg-structuretaxvaluedollarcnt'] = df_train['regionidcity'].map(group)
+
+        #Deviation away from average
+        df_train['N-Dev-structuretaxvaluedollarcnt'] = abs((df_train['structuretaxvaluedollarcnt']-\
+                                                            df_train['N-Avg-structuretaxvaluedollarcnt']))/\
+                                                            df_train['N-Avg-structuretaxvaluedollarcnt']
+        return df_train
+        
     def clean_properties(self):
         p = self.data.properties()
         cln = pd.DataFrame()
@@ -251,9 +353,13 @@ class DataPreprocessor:
         cln[c] = p[c]
         
         c = 'airconditioningtypeid'
-        cln[c] = p[c].fillna(0).astype('int').astype('str')
+        cln[c] = p[c].fillna(0).astype('int')
+        self.categories.append(c)
+        
         c = 'architecturalstyletypeid'
-        cln[c] = p[c].fillna(0).astype('int').astype('str')
+        cln[c] = p[c].fillna(0).astype('int')
+        self.categories.append(c)
+        
         c = 'basementsqft'
         cln[c] = p[c].fillna(0).astype('float32')
         c = 'bathroomcnt'
@@ -261,9 +367,12 @@ class DataPreprocessor:
         c = 'bedroomcnt'
         cln[c] = p[c].fillna(p[c].mode()[0]).astype('int')        
         c = 'buildingclasstypeid'
-        cln[c] = p[c].fillna(0).astype('int').astype('str')
+        cln[c] = p[c].fillna(0).astype('int')
+        self.categories.append(c)
+        
         c = 'buildingqualitytypeid'
-        cln[c] = p[c].fillna(0).astype('int').astype('str')
+        cln[c] = p[c].fillna(0).astype('int')
+        self.categories.append(c)
         
         c = 'calculatedbathnbr'
         cln[c] = p[c].fillna(0).astype('float32')
@@ -273,7 +382,8 @@ class DataPreprocessor:
         cln[c] = p[c].fillna(0).astype('int')
         
         c = 'decktypeid'
-        cln[c] = p[c].fillna(0).astype('int').astype('str')
+        cln[c] = p[c].fillna(0).astype('int')
+        self.categories.append(c)
         
         c = 'finishedfloor1squarefeet'
         cln[c] = p[c].fillna(0).astype('float32')
@@ -302,7 +412,8 @@ class DataPreprocessor:
         c = 'hashottuborspa'
         cln[c] = p[c] == True
         c = 'heatingorsystemtypeid'
-        cln[c] = p[c].fillna(0).astype('int').astype('str')
+        cln[c] = p[c].fillna(0).astype('int')
+        self.categories.append(c)
         
         c = 'latitude'
         cln[c] = p[c].fillna(p[c].mean()).astype('float32')
@@ -317,37 +428,49 @@ class DataPreprocessor:
         c = 'poolsizesum'
         cln[c] = p[c].fillna(0).astype('float32')
         c = 'pooltypeid10'
-        cln[c] = p[c].fillna(0).astype('int').astype('str')
+        cln[c] = p[c].fillna(0).astype('int')
+        self.categories.append(c)
         c = 'pooltypeid2'
-        cln[c] = p[c].fillna(0).astype('int').astype('str')
+        cln[c] = p[c].fillna(0).astype('int')
+        self.categories.append(c)
         c = 'pooltypeid7'
+        cln[c] = p[c].fillna(0).astype('int')
+        self.categories.append(c)
         
-        cln[c] = p[c].fillna(0).astype('int').astype('str')
         c = 'propertycountylandusecode'
-        cln[c] = p[c].fillna(p[c].mode()[0]).astype('str')
+        cln[c] = p[c].fillna(p[c].mode()[0])
+        self.categories.append(c)
         c = 'propertylandusetypeid'
-        cln[c] = p[c].fillna(p[c].mode()[0]).astype('str')
+        cln[c] = p[c].fillna(p[c].mode()[0])
+        self.categories.append(c)
         c = 'propertyzoningdesc'
-        cln[c] = p[c].fillna(p[c].mode()[0]).astype('str')
+        cln[c] = p[c].fillna(p[c].mode()[0])
+        self.categories.append(c)
 
         # c = 'rawcensustractandblock'
         # cln[c] = p[c].astype('str').replace('nan', None)
         
         c = 'regionidcity'
-        cln[c] = p[c].fillna(0).astype('int').astype('str')
+        cln[c] = p[c].fillna(0).astype('int')
+        self.categories.append(c)
         c = 'regionidcounty'
-        cln[c] = p[c].fillna(0).astype('int').astype('str')
+        cln[c] = p[c].fillna(0).astype('int')
+        self.categories.append(c)
         c = 'regionidneighborhood'
-        cln[c] = p[c].fillna(0).astype('int').astype('str')
+        cln[c] = p[c].fillna(0).astype('int')
+        self.categories.append(c)
         c = 'regionidzip'
-        cln[c] = p[c].fillna(0).astype('int').astype('str')
+        cln[c] = p[c].fillna(0).astype('int')
+        self.categories.append(c)
         
         c = 'roomcnt'
         cln[c] = p[c].fillna(p[c].mode()[0]).astype('int')
         c = 'storytypeid'
-        cln[c] = p[c].fillna(0).astype('int').astype('str')
+        cln[c] = p[c].fillna(0).astype('int')
+        self.categories.append(c)
         c = 'typeconstructiontypeid'
-        cln[c] = p[c].fillna(0).astype('int').astype('str')
+        cln[c] = p[c].fillna(0).astype('int')
+        self.categories.append(c)
         c = 'unitcnt'
         cln[c] = p[c].fillna(p[c].mode()[0]).astype('int')
         
@@ -387,20 +510,22 @@ class DataPreprocessor:
         cln.loc[p[c] >= 70, c] = cln[p[c] >= 70][c] + 1900
         cln[c] = cln[c].fillna(2016).astype('int')
         cln['taxdelinquencyyear_age'] = 2017 - cln[c]
-        cln[c].astype('str')
+        self.categories.append(c)
 
         c = 'censustractandblock'
-        cln[c] = p[c].astype('str').replace('nan', '0')
+        cln[c] = p[c].fillna(0)
+        self.categories.append(c)
 
         # FEATURE ENGINEERING        
         c = 'rawcensustractandblock'
         cln[c] = p[c]
         cln = self.split_census(cln)
+        self.categories.append(c)
         
         c = 'yearbuilt'
         cln['yearbuilt_adjusted'] = cln[c] - 1801
         cln['yearbuilt_age'] = 2017 - cln[c]
-        cln[c] = cln[c].astype('str')
+        self.categories.append(c)
         
         c = 'longitude'
         m = cln[c].mean()
@@ -424,7 +549,7 @@ class DataPreprocessor:
         cln['distance_fips'] = distance(cln['longitude_adjusted_fips'], cln['latitude_adjusted_fips'])
         cln = cln.drop(['longitude_fips_mean', 'latitude_fips_mean'], axis=1)
         
-        self.props = cln
+        self.props = self.add_features(cln)
         return cln       
 
 
@@ -441,9 +566,7 @@ class DataLoader:
         self.clear()
 
         self.file_train = 'train_2016_v2'
-        self.file_train_pre = 'train.pre'
         self.file_props = 'properties_2016'
-        self.file_props_pre = 'props.pre'
         self.file_subm = 'sample_submission'
 
     def load(self, f):
@@ -452,7 +575,17 @@ class DataLoader:
 
     def properties(self):
         if self.props is None:
-            self.props = self.load(self.file_props)
+            self.props = from_pickle('zillow/properties_2016.pkl')
+            
+        if self.props is None:
+            p = self.load(self.file_props)
+            for c in p.columns:
+                if p[c].dtype == np.float64:
+                    p[c] = p[c].astype(np.float32)
+            to_pickle(p, 'zillow/properties_2016.pkl')
+            self.props = p
+            del p; gc.collect()
+            
         return self.props
 
     def transactions(self):
@@ -470,308 +603,4 @@ class DataLoader:
         self.train = None
         self.subm = None
         gc.collect()
-
-#------------------------------------------------------------------------------
-#------------------------------------------------------------------------------
-
-
-class DataTransformer:
-    
-    def __init__(self):
-        self.train = None
-        self.mappers = None
-
-    def fit(self, df, dropcols=set()):
-        if self.mappers == None:
-            self.mappers = from_pickle('zillow/mappers.pkl')
-            if self.mappers:
-                self.cat_map_fit = self.mappers[0][0]
-                self.con_map_fit = self.mappers[1][0]
-                self.add_map_fit = self.mappers[2][0]
-
-        if self.mappers == None:
-            rem_cols = set(df.columns) - set(['logerror', 'logerror_abs', 'parcelid']) - dropcols
-            add_cols = set([ c for c in rem_cols if c.startswith('logerror') ] + ['transaction_month'])
-            rem_cols = rem_cols - add_cols
-            cat_cols = set([ c for c in rem_cols if df[c].dtype.name == 'object' ])
-            con_cols = rem_cols - cat_cols
-
-            add_maps = [([c], MinMaxScaler()) for c in add_cols]
-            cat_maps = [(c, LabelEncoder()) for c in cat_cols]
-            con_maps = [([c], MinMaxScaler()) for c in con_cols]
-
-            add_mapper = DataFrameMapper(add_maps)
-            self.add_map_fit = add_mapper.fit(self.data.error_trend())
-
-            cat_mapper = DataFrameMapper(cat_maps)
-            self.cat_map_fit = cat_mapper.fit(self.data.properties())
-
-            con_mapper = DataFrameMapper(con_maps)
-            self.con_map_fit = con_mapper.fit(self.data.training())
-
-            self.mappers = [(self.cat_map_fit, 'int64'), (self.con_map_fit, 'float32'), (self.add_map_fit, 'float32')]
-            to_pickle(self.mappers, 'zillow/mappers.pkl')
-
-            gc.collect()
-
-        return self.mappers
-
-    def transform(self, df):
-        mapped = []
-        for m, dtype in self.mappers:
-            mapped.append(m.transform(df).astype(dtype))
-        return np.concatenate(mapped, axis=1)    
-    
-    def fit_transform(self, data, dropcols=set()):
-        mappers = self.fit(data.properties(), dropcols)
-        x_train, x_valid, x_test, y_train, y_valid, y_test = data.training()
-        x_train = self.transform(x_train, mappers)
-        x_valid = self.transform(x_valid, mappers)
-        x_test = self.transform(x_test, mappers)
-        gc.collect()
-        return x_train, x_valid, x_test, y_train, y_valid, y_test    
-
-    
-#------------------------------------------------------------------------------
-#------------------------------------------------------------------------------
-
-
-class XGB:
-    
-    def __init__(self, data=DataLoader()):
-        self.data = data
-        self.clf = None
-    
-    def remove_outliers(self, X, y, ycol):
-        # return X, y
-        t = self.data.preprocessed.transactions()
-        l_min = t[ycol].quantile(.05)
-        l_max = t[ycol].quantile(.95)
-        f = (y >= l_min) & (y <= l_max)
-        return X[f], y[f]
-
-    def adapt(self, df, dropcols=set()):
-        mustdropcols = set([
-                    'propertyzoningdesc', 
-                    'propertycountylandusecode', 
-                    'censustractandblock',
-                    'rawcensustractandblock',
-                    'parcelid',
-                   ])
-
-        mustdropcols = mustdropcols | set(dropcols)
-        df = df.drop(mustdropcols, axis=1)
-
-        for c in df.columns:
-            if df[c].dtype.name == 'object':
-                df[c] = df[c].replace('',0).astype(np.float32)
-
-        return df
-
-    def train(self, ycol='logerror', params=None, dropcols=set(), verbose_eval=False):
-        if params is None:
-            params = {
-                'eta': 0.005,
-                'objective': 'reg:linear',
-                'eval_metric': 'mae',
-                'max_depth': 3,
-                'silent': 1,
-                'subsample': 0.75,
-                'colsample_bytree': 0.8,
-                'min_child_weight': 4,
-                'lambda': 2,
-            }        
         
-        x_train, x_valid, x_test, y_train, y_valid, y_test = self.data.preprocessed.training(ycol=ycol)
-        
-        # combine train and valid
-        x_train = pd.concat([x_train, x_valid])
-        y_train = pd.concat([y_train, y_valid])
-        x_valid = x_test
-        y_valid = y_test
-        
-        x_train, y_train = self.remove_outliers(x_train, y_train, ycol)
-        # x_valid, y_valid = self.remove_outliers(x_valid, y_valid, ycol)
-
-        d_train = xgb.DMatrix(self.adapt(x_train, dropcols), label=y_train, silent=True)
-        d_valid = xgb.DMatrix(self.adapt(x_valid, dropcols), label=y_valid, silent=True)
-        # d_test = xgb.DMatrix(self.adapt(x_test), label=y_test, silent=True)
-
-        del x_train, x_valid, x_test; gc.collect()
-
-        watchlist = [(d_train, 'train'), (d_valid, 'valid')]
-        evals_result = {}
-        self.clf = xgb.train(params, d_train, 10000, watchlist, evals_result=evals_result, 
-                             early_stopping_rounds=200, verbose_eval=verbose_eval)
-        del d_train, d_valid; gc.collect()
-
-        print (self.clf.attributes()['best_msg'])
-        return self.clf, evals_result
-
-
-    def predict(self, dropcols=set()):
-        # build the test set
-        subm = pd.DataFrame()
-        months = [10, 11, 12, 22, 23, 24]
-        dates = ['201610', '201611', '201612', '201710', '201711', '201712']
-    #     months = [10]
-    #     dates = ['201610']
-        for month, date in zip(months, dates):
-            print('Predicting...', date)
-
-            merged = self.data.preprocessed.prediction(month)
-            subm['ParcelId'] = merged['parcelid']
-            merged = self.adapt(merged, dropcols)
-
-            dm_test = xgb.DMatrix(merged)
-            del merged; gc.collect()
-            
-            subm[date] = self.clf.predict(dm_test)
-            del dm_test; gc.collect()
-
-        subm.to_csv('zillow/submission.xgb.csv.gz', index=False, float_format='%.4f', compression='gzip')
-        return subm
-
-
-    def importance(self):
-        imp = self.clf.get_fscore()
-        imp = sorted(imp.items(), key=lambda x: x[1])
-
-        df = pd.DataFrame(imp, columns=['feature', 'fscore'])
-        df['fscore'] = df['fscore'] / df['fscore'].sum()
-
-        df.plot(kind='barh', x='feature', y='fscore', legend=False, figsize=(6, 10))
-        plt.title('XGBoost Feature Importance')
-        plt.xlabel('relative importance');
-        return df
-
-
-#------------------------------------------------------------------------------
-#------------------------------------------------------------------------------
-
-
-class NeuralNet:
-
-    def __init__(self, data, dropcols=set()):
-        self.data = data
-        self.dropcols = dropcols
-
-        self.x_train = None
-        self.x_valid = None
-        self.x_test = None
-
-        self.y_train = None
-        self.y_valid = None
-        self.y_test = None
-
-        self.model = None
-        self.mappers = None
-
-    def feature_split(self, df):
-        return np.split(df, df.shape[1], axis=1)
-
-    def get_model(self):
-        if self.model == None:
-            embsz = 32
-
-            def categorical_input(fname, fclasses):
-                vocsz = len(fclasses)
-            #     print(vocsz)
-                inp = Input((1,), dtype='int64', name=fname+'_inp')
-                emb_init = keras.initializers.RandomUniform(minval=-0.06/embsz, maxval=0.06/embsz)
-                out = Embedding(vocsz, embsz, input_length=1, embeddings_initializer=emb_init)(inp)
-                out = Flatten(name=fname+'_flt')(out)
-                # if fname == 'parcelid':
-                #    out = Dropout(0.9)(out)
-                out = Dense(1, name=fname+'_den', activation='relu', use_bias=False, kernel_initializer='ones')(out)
-                return inp, out
-
-            def continuous_input(fname):
-                inp = Input((1,), dtype='float32', name=fname+'_inp')
-                out = Dense(1, name=fname+'_den', activation='relu', use_bias=False, kernel_initializer='ones')(inp)
-                return inp, out
-
-            def dense_stack(inp, layers, units, dropout):
-                den = Dropout(dropout)(inp)
-                for i in range(layers):
-                    den = Dense(units, activation='relu', kernel_initializer='random_uniform')(den)
-                return den
-            
-            def dense_weave(inp, threads, layers, units, dropout):
-                return [ dense_stack(inp, layers, units, dropout) for t in range(threads) ]
-            
-            self.fit()
-            cat_in = [ categorical_input(f[0], f[1].classes_) for f in self.cat_map_fit.features ]
-            con_in = [ continuous_input(f[0][0]) for f in self.con_map_fit.features ] +\
-            [ continuous_input(f[0][0]) for f in self.add_map_fit.features ]
-
-            # err_ave_in = Input((1,), dtype='float32', name='err_ave_inp')
-            # err_dev_in = Input((1,), dtype='float32', name='err_dev_inp')
-
-            den = concatenate([ o for _, o in cat_in ] + [ o for _, o in con_in ])
-            # den = Dropout(0.02)(den)
-            # den = Dense(1024, activation='relu', kernel_initializer='random_uniform')(den)
-            # den = Dense(1024, activation='relu', kernel_initializer='random_uniform')(den)
-            den = concatenate(dense_stack(den, 16, 2, 1) + 
-                              dense_stack(den, 8, 2, 2) + 
-                              dense_stack(den, 4, 2, 4) + 
-                              dense_stack(den, 2, 2, 8))
-            den = Dense(1, activation='linear')(den)
-            # den = Dense(1, activation='linear')(den)
-            # out = multiply([den, err_dev_in])
-            # out = add([out, err_ave_in])
-
-            model = Model(inputs=[ i for i, _ in cat_in ] + [ i for i, _ in con_in ], outputs=[den])
-            opt = keras.optimizers.Adam(lr=0.001, decay=0.0)
-            model.summary()
-            model.compile(loss='mean_absolute_error', optimizer=opt)
-
-            self.model = model
-            gc.collect()
-
-        return self.model
-
-    def train(self, epochs=5, callbacks=None, verbose=1):
-        x_train, x_valid, x_test, y_train, y_valid, y_test = self.training()
-        x = np.concatenate([x_valid, x_test])
-        y = np.concatenate([y_valid, y_test])
-        hist = self.get_model().fit(self.feature_split(x_train), y_train, batch_size=256, epochs=epochs, verbose=verbose, callbacks=callbacks, validation_data=(self.feature_split(x), y), shuffle=True)
-        preds = self.get_model().predict(self.feature_split(x_test))
-        print (preds)
-        mae = mean_absolute_error(y_test, preds)
-        return mae
-
-    def test(self):
-        x_train, x_valid, x_test, y_train, y_valid, y_test = self.training()
-        x = np.concatenate([x_valid, x_test])
-        y = np.concatenate([y_valid, y_test])
-        preds = self.get_model().predict(self.feature_split(x))
-        mae = mean_absolute_error(y, preds)
-        return mae
-
-    def predict(self, verbose=1):
-        # build the test set
-        subm = pd.DataFrame()
-        subm['ParcelId'] = self.data.properties()['parcelid']
-        months = [10, 11, 12, 22, 23, 24]
-        dates = ['201610', '201611', '201612', '201710', '201711', '201712']
-    #     months = [10]
-    #     dates = ['201610']
-        for month, date in zip(months, dates):
-            print('\nPredicting...', date)
-
-            x = self.data.prediction(month)
-            # print (x.columns)
-            # print (x.isnull().any())
-            # e = x[['logerror_month_ave', 'logerror_month_std']]
-            # e['logerror_month_std'] = e['logerror_month_std'].apply(np.sqrt) * 3
-            x = self.transform(x, self.mappers)
-            # x = np.concatenate([x, e], axis=1)
-            x = self.feature_split(x)
-            
-            subm[date] = self.model.predict(x, verbose=verbose)
-            subm.to_csv('zillow/{}.csv.gz'.format(date), index=False, float_format='%.4f', compression='gzip')
-            del x; gc.collect()
-
-        subm.to_csv('zillow/submission_nn.csv.gz', index=False, float_format='%.4f', compression='gzip')
-        return subm
