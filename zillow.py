@@ -61,16 +61,20 @@ class DataPreprocessor:
     def properties(self):
         if self.props is None:
             self.props = from_pickle('zillow/props.pkl')
+            self.categories = from_pickle('zillow/categories.pkl')
 
         if self.props is None:
+            self.categories = []
             self.clean_properties()
             to_pickle(self.props, 'zillow/props.pkl')
+            to_pickle(self.categories, 'zillow/categories.pkl')
 
         return self.props
 
     def training(self, ycol='logerror', month=9, dropcols=set()):
         if self.train is None:
             self.train = from_pickle('zillow/train.pkl')
+            self.categories = from_pickle('zillow/categories.pkl')
             # self.trend = from_pickle('zillow/trend.pkl')
             # self.error_month = from_pickle('zillow/error_month.pkl')
             # self.error_fips_month = from_pickle('zillow/error_fips_month.pkl')
@@ -136,12 +140,16 @@ class DataPreprocessor:
     def split_census(self, df):
         c = 'rawcensustractandblock'
         df[c] = df[c].astype('str')
-        df['fips'] = df[c].str.slice(0, 4).replace('nan', '')
-        df['tract'] = df[c].str.slice(4, 11)
-        df['block'] = df[c].str.slice(11)
+        df['fips'] = df[c].str.slice(0, 5).replace('nan', '')
+        df['tract'] = df[c].str.slice(5, 12)
+        df['block'] = df[c].str.slice(12, -1)
+        df['fipstract'] = df[c].str.slice(0, 12)
+        df['tractblock'] = df[c].str.slice(5, -1)
         self.categories.append('fips')
         self.categories.append('tract')
         self.categories.append('block')
+        self.categories.append('fipstract')
+        self.categories.append('tractblock')
         return df
 
     # utility function for splitting the date into components
@@ -250,16 +258,12 @@ class DataPreprocessor:
     # Creating Additional Features
     def add_features(self, df_train):
         #error in calculation of the finished living area of home
-        # c = 'N-LivingAreaError'
-        # df_train[c] = (df_train['calculatedfinishedsquarefeet'].astype(float) / (df_train['finishedsquarefeet12'].astype(float) + 0.001))
-        # df_train[c] = df_train[c].replace(np.inf, df_train[c].mean(), inplace=True)
-        # df_train[c] = df_train[c].fillna(df_train[c].mean(), inplace=True)
+        c = 'N-LivingAreaError'
+        df_train[c] = df_train['calculatedfinishedsquarefeet'] / df_train['finishedsquarefeet12']
 
         #proportion of living area
         df_train['N-LivingAreaProp'] = df_train['calculatedfinishedsquarefeet']/df_train['lotsizesquarefeet']
-        # df_train['N-LivingAreaProp2'] = (df_train['finishedsquarefeet12']/df_train['finishedsquarefeet15'])
-        # df_train['N-LivingAreaProp2'] = df_train['N-LivingAreaProp2'].fillna(df_train['N-LivingAreaProp2'].mean(), inplace=True)
-        # df_train['N-LivingAreaProp2'] = df_train['N-LivingAreaProp2'].replace(np.inf, df_train['N-LivingAreaProp2'].mean(), inplace=True)
+        df_train['N-LivingAreaProp2'] = (df_train['finishedsquarefeet12']/df_train['finishedsquarefeet15'])
 
         #Amout of extra space
         df_train['N-ExtraSpace'] = df_train['lotsizesquarefeet'] - df_train['calculatedfinishedsquarefeet'] 
@@ -269,15 +273,15 @@ class DataPreprocessor:
         df_train['N-TotalRooms'] = df_train['bathroomcnt'] + df_train['bedroomcnt']
 
         #Average room size
-        # df_train['N-AvRoomSize'] = df_train['calculatedfinishedsquarefeet'] / df_train['roomcnt'] 
-        # df_train['N-AvRoomSize'] = df_train['N-AvRoomSize'].fillna(df_train['N-AvRoomSize'].mean(), inplace=True)
-        # df_train['N-AvRoomSize'] = df_train['N-AvRoomSize'].replace(np.inf, df_train['N-AvRoomSize'].mean(), inplace=True)
+        c = 'N-AvRoomSize'
+        df_train[c] = df_train['calculatedfinishedsquarefeet'] / df_train['roomcnt'] 
+        df_train[c] = df_train[c].replace([np.inf, -np.inf, np.nan], [0, 0, 0])
 
         # Number of Extra rooms
         df_train['N-ExtraRooms'] = df_train['roomcnt'] - df_train['N-TotalRooms'] 
 
         #Ratio of the built structure value to land area
-        # df_train['N-ValueProp'] = df_train['structuretaxvaluedollarcnt']/df_train['landtaxvaluedollarcnt']
+        df_train['N-ValueProp'] = df_train['structuretaxvaluedollarcnt']/df_train['landtaxvaluedollarcnt']
 
         #Does property have a garage, pool or hot tub and AC?
         df_train['N-GarPoolAC'] = ((df_train['garagecarcnt']>0) & (df_train['pooltypeid10'].astype(int)>0) &\
@@ -291,8 +295,7 @@ class DataPreprocessor:
         df_train["N-longitude-round"] = df_train["longitude"].round(-4)
         
         #Ratio of tax of property over parcel
-        # df_train['N-ValueRatio'] = df_train['taxvaluedollarcnt'] / df_train['taxamount']
-        # df_train['N-ValueRatio'] = df_train['N-ValueRatio'].replace(np.inf, df_train['N-ValueRatio'].mean(), inplace=True)
+        df_train['N-ValueRatio'] = df_train['taxvaluedollarcnt'] / df_train['taxamount']
 
         #TotalTaxScore
         df_train['N-TaxScore'] = df_train['taxvaluedollarcnt'] * df_train['taxamount']
@@ -324,11 +327,12 @@ class DataPreprocessor:
 
         #There's 25 different property uses - let's compress them down to 4 categories
         c = 'N-PropType'
-        df_train[c] = df_train.propertylandusetypeid.astype(float).replace(
-            {31 : "Mixed", 46 : "Other", 47 : "Mixed", 246 : "Mixed", 247 : "Mixed", 248 : "Mixed", 260 : "Home", 261 : "Home", 
-             262 : "Home", 263 : "Home", 264 : "Home", 265 : "Home", 266 : "Home", 267 : "Home", 268 : "Home", 269 : "Not Built", 
-             270 : "Home", 271 : "Home", 273 : "Home", 274 : "Other", 275 : "Home", 276 : "Home", 279 : "Home", 290 : "Not Built", 
-             291 : "Not Built" })
+        df_train[c] = df_train.propertylandusetypeid.astype(int).replace(
+            {31 : "Mixed", 46 : "Other", 47 : "Mixed", 246 : "Mixed", 247 : "Mixed", 248 : "Mixed", 260 : "Home", 
+             261 : "Home", 262 : "Home", 263 : "Home", 264 : "Home", 265 : "Home", 266 : "Home", 267 : "Home", 268 : "Home", 
+             269 : "Not Built", 270 : "Home", 271 : "Home", 273 : "Home", 274 : "Other", 275 : "Home", 276 : "Home", 
+             279 : "Home", 290 : "Not Built", 291 : "Not Built", 
+             -1: "Unknown" })
         self.categories.append(c)
         
         #polnomials of the variable
@@ -344,162 +348,216 @@ class DataPreprocessor:
                                                             df_train['N-Avg-structuretaxvaluedollarcnt']))/\
                                                             df_train['N-Avg-structuretaxvaluedollarcnt']
         return df_train
+    
+    def fill_by_locale(self, df, column, method='mode'):
+        # fill_locales = ['rawcensustractandblock', 'fipstract', 'regionidcity', 'fips']
+        fill_locales = ['rawcensustractandblock']
+        fill_mode = lambda x: x.value_counts().index[0] if len(x.value_counts()) > 0 else None
+        fill_methods = {
+                'mode': fill_mode,
+                'mean': np.mean,
+                'median': np.median,
+            }
         
+        if method == 'mode':
+            fill = df[column].mode()[0]
+        elif method == 'median':
+            fill = df[column].median()
+        elif method == 'mean':
+            fill = df[column].mean()
+            
+        for locale in fill_locales:
+            m = fill_methods[method]
+            grp = df[[locale, column]].groupby(locale).agg(m)
+            grp.columns = [column+'_'+method]
+            grp = grp.reset_index()
+            df = df.merge(grp, how='left', on=locale)
+            df[column] = df[column].fillna(df[column+'_'+method])
+            df.drop(column+'_'+method, axis=1, inplace=True)
+            if not df.loc[~df.rawcensustractandblock.isnull(), column].isnull().any(): break
+        
+        df[column] = df[column].fillna(fill)
+        return df    
+    
     def clean_properties(self):
         p = self.data.properties()
-        cln = pd.DataFrame()
-        
+        cln = pd.DataFrame()        
+    
         c = 'parcelid'
         cln[c] = p[c]
         
+        c = 'rawcensustractandblock'
+        cln[c] = p[c]
+        cln = self.split_census(cln)
+        cln[c].replace('nan', -1, inplace=True)
+        self.categories.append(c)
+
+        c = 'regionidcity'
+        cln[c] = p[c].fillna(-1).astype(int)
+        self.categories.append(c)
+        c = 'regionidcounty'
+        cln[c] = p[c].fillna(-1).astype(int)
+        self.categories.append(c)
+        c = 'regionidneighborhood'
+        cln[c] = p[c].fillna(-1).astype(int)
+        self.categories.append(c)
+        c = 'regionidzip'
+        cln[c] = p[c].fillna(-1).astype(int)
+        self.categories.append(c)
+                
         c = 'airconditioningtypeid'
-        cln[c] = p[c].fillna(0).astype('int')
+        cln[c] = p[c].fillna(-1).astype(int)
         self.categories.append(c)
         
         c = 'architecturalstyletypeid'
-        cln[c] = p[c].fillna(0).astype('int')
+        cln[c] = p[c].fillna(-1).astype(int)
         self.categories.append(c)
         
         c = 'basementsqft'
-        cln[c] = p[c].fillna(0).astype('float32')
+        cln[c] = p[c].fillna(-1).astype('float32')
+        
         c = 'bathroomcnt'
-        cln[c] = p[c].fillna(p[c].mode()[0]).astype('float32')
+        cln[c] = p[c].fillna(-1).astype('float32')
+        
         c = 'bedroomcnt'
-        cln[c] = p[c].fillna(p[c].mode()[0]).astype('int')        
+        cln[c] = p[c].fillna(-1).astype(int)
+        
         c = 'buildingclasstypeid'
-        cln[c] = p[c].fillna(0).astype('int')
+        cln[c] = p[c].fillna(-1).astype(int)
         self.categories.append(c)
         
         c = 'buildingqualitytypeid'
-        cln[c] = p[c].fillna(0).astype('int')
-        self.categories.append(c)
+        cln[c] = p[c].fillna(-1).astype(int)
+        # self.categories.append(c) # higher is better so maybe it's fine
         
         c = 'calculatedbathnbr'
-        cln[c] = p[c].fillna(0).astype('float32')
+        cln[c] = p[c].fillna(-1).astype('float32')
         c = 'threequarterbathnbr'
-        cln[c] = p[c].fillna(0).astype('int')
+        cln[c] = p[c].fillna(-1).astype(int)
         c = 'fullbathcnt'
-        cln[c] = p[c].fillna(0).astype('int')
+        cln[c] = p[c].fillna(-1).astype(int)
         
         c = 'decktypeid'
-        cln[c] = p[c].fillna(0).astype('int')
+        cln[c] = p[c].fillna(-1).astype(int)
         self.categories.append(c)
         
         c = 'finishedfloor1squarefeet'
-        cln[c] = p[c].fillna(0).astype('float32')
+        cln[c] = p[c].fillna(-1).astype('float32')
         c = 'calculatedfinishedsquarefeet'
-        cln[c] = p[c].fillna(0).astype('float32')
+        cln[c] = p[c].fillna(-1).astype('float32')
         c = 'finishedsquarefeet12'
-        cln[c] = p[c].fillna(0).astype('float32')
+        cln[c] = p[c].fillna(-1).astype('float32')
+        
         c = 'finishedsquarefeet13'
-        cln[c] = p[c].fillna(0).astype('float32')
+        cln[c] = p[c].fillna(-1).astype('float32')
         c = 'finishedsquarefeet15'
-        cln[c] = p[c].fillna(0).astype('float32')
+        cln[c] = p[c].fillna(-1).astype('float32')
         c = 'finishedsquarefeet50'
-        cln[c] = p[c].fillna(0).astype('float32')
+        cln[c] = p[c].fillna(-1).astype('float32')
         c = 'finishedsquarefeet6'
-        cln[c] = p[c].fillna(0).astype('float32')        
+        cln[c] = p[c].fillna(-1).astype('float32')        
         
         # c = 'fips'
         # cln[c] = p[c].fillna(0).astype('int').astype('str')
         
         c = 'fireplacecnt'
-        cln[c] = p[c].fillna(0).astype('int')        
+        cln[c] = p[c].fillna(-1).astype(int)
+        
         c = 'garagecarcnt'
-        cln[c] = p[c].fillna(p[c].mode()[0]).astype('int')        
+        cln[c] = p[c].fillna(-1).astype(int)
+        
         c = 'garagetotalsqft'
-        cln[c] = p[c].fillna(0).astype('float32')
+        cln[c] = p[c].fillna(-1).astype('float32')
+        
         c = 'hashottuborspa'
         cln[c] = p[c] == True
-        c = 'heatingorsystemtypeid'
-        cln[c] = p[c].fillna(0).astype('int')
-        self.categories.append(c)
         
-        c = 'latitude'
-        cln[c] = p[c].fillna(p[c].mean()).astype('float32')
-        c = 'longitude'
-        cln[c] = p[c].fillna(p[c].mean()).astype('float32')
+        c = 'heatingorsystemtypeid'
+        cln[c] = p[c].fillna(-1).astype(int)
+        self.categories.append(c)
         
         c = 'lotsizesquarefeet'
-        cln[c] = p[c].fillna(p[c].median()).astype('float32')
+        cln[c] = p[c].fillna(-1).astype('float32')
         
         c = 'poolcnt'
-        cln[c] = p[c].fillna(0).astype('int')
+        cln[c] = p[c].fillna(-1).astype('int')
         c = 'poolsizesum'
-        cln[c] = p[c].fillna(0).astype('float32')
+        cln[c] = p[c].fillna(-1).astype('float32')
         c = 'pooltypeid10'
-        cln[c] = p[c].fillna(0).astype('int')
+        cln[c] = p[c].fillna(-1).astype('int')
         self.categories.append(c)
         c = 'pooltypeid2'
-        cln[c] = p[c].fillna(0).astype('int')
+        cln[c] = p[c].fillna(-1).astype('int')
         self.categories.append(c)
         c = 'pooltypeid7'
-        cln[c] = p[c].fillna(0).astype('int')
+        cln[c] = p[c].fillna(-1).astype('int')
         self.categories.append(c)
         
         c = 'propertycountylandusecode'
-        cln[c] = p[c].fillna(p[c].mode()[0])
+        cln[c] = p[c].fillna(-1).astype('str')
         self.categories.append(c)
         c = 'propertylandusetypeid'
-        cln[c] = p[c].fillna(p[c].mode()[0])
+        cln[c] = p[c].fillna(-1).astype(int)
         self.categories.append(c)
         c = 'propertyzoningdesc'
-        cln[c] = p[c].fillna(p[c].mode()[0])
+        cln[c] = p[c].fillna(-1)
         self.categories.append(c)
 
         # c = 'rawcensustractandblock'
         # cln[c] = p[c].astype('str').replace('nan', None)
         
-        c = 'regionidcity'
-        cln[c] = p[c].fillna(0).astype('int')
-        self.categories.append(c)
-        c = 'regionidcounty'
-        cln[c] = p[c].fillna(0).astype('int')
-        self.categories.append(c)
-        c = 'regionidneighborhood'
-        cln[c] = p[c].fillna(0).astype('int')
-        self.categories.append(c)
-        c = 'regionidzip'
-        cln[c] = p[c].fillna(0).astype('int')
-        self.categories.append(c)
+        # c = 'regionidcity'
+        # cln[c] = p[c].fillna(0).astype('int')
+        # self.categories.append(c)
+        # c = 'regionidcounty'
+        # cln[c] = p[c].fillna(0).astype('int')
+        # self.categories.append(c)
+        # c = 'regionidneighborhood'
+        # cln[c] = p[c].fillna(0).astype('int')
+        # self.categories.append(c)
+        # c = 'regionidzip'
+        # cln[c] = p[c].fillna(0).astype('int')
+        # self.categories.append(c)
         
         c = 'roomcnt'
-        cln[c] = p[c].fillna(p[c].mode()[0]).astype('int')
+        cln[c] = p[c].fillna(-1).astype(int)
         c = 'storytypeid'
-        cln[c] = p[c].fillna(0).astype('int')
+        cln[c] = p[c].fillna(-1).astype(int)
         self.categories.append(c)
         c = 'typeconstructiontypeid'
-        cln[c] = p[c].fillna(0).astype('int')
+        cln[c] = p[c].fillna(-1).astype(int)
         self.categories.append(c)
         c = 'unitcnt'
-        cln[c] = p[c].fillna(p[c].mode()[0]).astype('int')
+        cln[c] = p[c].fillna(-1).astype(int)
         
         c = 'yardbuildingsqft17'
-        cln[c] = p[c].fillna(0).astype('float32')
+        cln[c] = p[c].fillna(-1).astype('float32')
         c = 'yardbuildingsqft26'
-        cln[c] = p[c].fillna(0).astype('float32')
+        cln[c] = p[c].fillna(-1).astype('float32')
         
         c = 'yearbuilt'
         cln[c] = p[c].fillna(2016).astype('int')
+        self.categories.append(c)
         
         c = 'numberofstories'
-        cln[c] = p[c].fillna(p[c].mode()[0]).astype('int')
+        cln[c] = p[c].fillna(-1).astype(int)
+
         c = 'fireplaceflag'
         cln[c] = p[c] == True
         
         c = 'structuretaxvaluedollarcnt'
-        cln[c] = p[c].fillna(0).astype('float32')
+        cln[c] = p[c].fillna(-1).astype('float32')
         c = 'taxvaluedollarcnt'
-        cln[c] = p[c].fillna(0).astype('float32')
+        cln[c] = p[c].fillna(-1).astype('float32')
         c = 'landtaxvaluedollarcnt'
-        cln[c] = p[c].fillna(0).astype('float32')
+        cln[c] = p[c].fillna(-1).astype('float32')
         c = 'taxamount'
-        cln[c] = p[c].fillna(0).astype('float32')
+        cln[c] = p[c].fillna(-1).astype('float32')
         
         c = 'assessmentyear'
         cln[c] = p[c].fillna(2017).astype('int')
         cln['assessmentyear_age'] = 2017 - cln[c]
-        cln[c].astype('str')
+        self.categories.append(c)
         
         c = 'taxdelinquencyflag'
         cln[c] = p[c] == 'Y'
@@ -508,32 +566,24 @@ class DataPreprocessor:
         cln[c] = p[c]
         cln.loc[p[c] < 70, c] = cln[p[c] < 70][c] + 2000
         cln.loc[p[c] >= 70, c] = cln[p[c] >= 70][c] + 1900
-        cln[c] = cln[c].fillna(2016).astype('int')
+        cln[c] = cln[c].fillna(-1).astype('int') # no tax delinquency
         cln['taxdelinquencyyear_age'] = 2017 - cln[c]
         self.categories.append(c)
 
-        c = 'censustractandblock'
-        cln[c] = p[c].fillna(0)
-        self.categories.append(c)
-
         # FEATURE ENGINEERING        
-        c = 'rawcensustractandblock'
-        cln[c] = p[c]
-        cln = self.split_census(cln)
-        self.categories.append(c)
-        
         c = 'yearbuilt'
         cln['yearbuilt_adjusted'] = cln[c] - 1801
         cln['yearbuilt_age'] = 2017 - cln[c]
-        self.categories.append(c)
-        
-        c = 'longitude'
-        m = cln[c].mean()
-        cln['longitude_adjusted'] = (cln[c] - m).fillna(0)
         
         c = 'latitude'
-        m = cln[c].mean()
-        cln['latitude_adjusted'] = (cln[c] - m).fillna(0)        
+        lat_mean = p[c].mean()
+        cln[c] = p[c].fillna(lat_mean).astype('float32')
+        cln['latitude_adjusted'] = cln[c] - lat_mean
+        
+        c = 'longitude'
+        lon_mean = p[c].mean()
+        cln[c] = p[c].fillna(lon_mean).astype('float32')
+        cln['longitude_adjusted'] = cln[c] - lon_mean
         
         def distance(x, y):
             return np.sqrt(x**2 + y**2).sum()
@@ -550,7 +600,8 @@ class DataPreprocessor:
         cln = cln.drop(['longitude_fips_mean', 'latitude_fips_mean'], axis=1)
         
         self.props = self.add_features(cln)
-        return cln       
+        self.props = cln
+        return self.props
 
 
 #------------------------------------------------------------------------------
@@ -578,7 +629,7 @@ class DataLoader:
             self.props = from_pickle('zillow/properties_2016.pkl')
             
         if self.props is None:
-            p = self.load(self.file_props)
+            p = pd.read_csv('zillow/properties_2016.csv', dtype={'rawcensustractandblock': np.str})
             for c in p.columns:
                 if p[c].dtype == np.float64:
                     p[c] = p[c].astype(np.float32)
